@@ -158,3 +158,37 @@ test('downloaded WebGPU models show as usable; undownloaded ones never start a h
   assert.match(j.error.message, /isn't downloaded yet/);
   assert.equal(seen.length, 0, 'no job (and so no download) was sent to the engine');
 });
+
+test('only one engine page gets work: a newer page takes over and older ones are retired', async () => {
+  const app = createReroute({ quiet: true, notify: false, probe: false, updates: false });
+  app.config.mode = 'fallback';
+  app.config.localOnly = true;
+  const port = await app.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  // An old window that reconnected: it must not receive jobs once a newer page is connected.
+  const oldEvents = [];
+  const ac = new AbortController();
+  const oldRes = await fetch(base + '/reroute/engine/events', { signal: ac.signal });
+  (async () => {
+    const dec = new TextDecoder();
+    try {
+      for await (const c of oldRes.body) for (const m of dec.decode(c).matchAll(/^event: (\w+)/gm)) oldEvents.push(m[1]);
+    } catch {}
+  })();
+  await new Promise((r) => setTimeout(r, 100));
+  const seen = [];
+  const stop = await fakeEnginePage(base, seen);
+  await new Promise((r) => setTimeout(r, 100));
+  const r = await fetch(base + '/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-sonnet-5-5', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], tools: [{ name: 'Read', input_schema: { type: 'object' } }] }),
+  });
+  await r.text();
+  stop();
+  ac.abort();
+  await app.close();
+  assert.equal(seen.length, 1, 'the newest page ran the job');
+  assert.ok(oldEvents.includes('retire'), 'the old page was told to retire');
+  assert.ok(!oldEvents.includes('job'), 'the old page never got the job');
+});

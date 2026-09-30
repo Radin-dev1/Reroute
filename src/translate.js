@@ -247,7 +247,9 @@ function toolInput(args) {
 
 // Tool calls written into the text: <tool_call>{"name":..,"arguments":..}</tool_call> (Qwen/Hermes style),
 // <function=Name>{...}</function>, or a bare {"name":..,"arguments":..} object that is the whole reply.
-const TEXT_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>|<function=([\w.-]+)>\s*([\s\S]*?)\s*<\/function>/g;
+// The closing tag may be missing: Qwen models emit </tool_call> as a special token, which local engines
+// strip from the text, so a call can run to the end of the reply unclosed.
+const TEXT_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>|(?=<tool_call>)|$)|<function=([\w.-]+)>\s*([\s\S]*?)\s*(?:<\/function>|(?=<function=)|$)/g;
 
 export function extractTextToolCalls(text, toolNames) {
   if (!text || !toolNames?.length) return { text, calls: [] };
@@ -597,5 +599,27 @@ export function slimForSmallModel(body) {
     .filter((t) => t && t.input_schema && t.name !== 'DeferredToolPlaceholder')
     .filter((t) => CORE_TOOLS.has(t.name) || used.has(t.name) || (t.defer_loading && t.name.startsWith('mcp__')))
     .map((t) => ({ ...t, description: shortText(t.description, 700), input_schema: slimSchema(t.input_schema) }));
-  return { ...body, tools };
+  return { ...body, tools, messages: withSmallModelNote(body, tools) };
+}
+
+// Small models lose track of Claude Code's long instructions and answer "please give me the path"
+// instead of using a tool. A short note right before they answer (where they pay most attention)
+// fixes that: where the files are, and to use the tools rather than ask.
+function withSmallModelNote(body, tools) {
+  const messages = body.messages || [];
+  // Claude Code puts its environment as a system message after the user's turn, so look for the
+  // last user message rather than the last message.
+  let at = messages.length - 1;
+  while (at >= 0 && messages[at].role === 'system') at--;
+  const last = messages[at];
+  if (!tools.length || !last || last.role !== 'user') return messages;
+  const text = [systemToText(body.system), ...messages.filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : systemToText(m.content)))].join('\n');
+  const cwd = (text.match(/Primary working directory: *(.+)/) || [])[1]?.trim();
+  const names = tools.map((t) => t.name).filter((n) => ['Read', 'Edit', 'Write', 'Bash', 'PowerShell', 'Glob', 'Grep'].includes(n));
+  const note =
+    `<system-reminder>You can use tools: ${names.join(', ')}.` +
+    (cwd ? ` The project folder is ${cwd}; file names the user mentions are in that folder (for example ${cwd}${cwd.includes('\\') ? '\\' : '/'}<file>).` : '') +
+    ' When you need to see or change a file, call the tool yourself. Do not ask the user for paths or file contents.</system-reminder>';
+  const content = typeof last.content === 'string' ? [{ type: 'text', text: last.content }] : last.content;
+  return [...messages.slice(0, at), { ...last, content: [...content, { type: 'text', text: note }] }, ...messages.slice(at + 1)];
 }

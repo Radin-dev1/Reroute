@@ -38,13 +38,33 @@ export function createEngineBridge(opts) {
   const log = opts.log || (() => {});
   const pages = new Set(); // SSE responses of connected engine pages
   const pending = new Map(); // job id -> { push, end, fail }
-  let info = { connected: false, webgpu: null, gpu: null, cached: [], loaded: null, loading: null, progress: null };
+  // Which models are downloaded is only known once the engine page reports it, and the page only opens
+  // when a model is needed. So the last report is kept on disk and read back when Reroute starts.
+  const stateFile = path.join(HOME_DIR, 'engine-state.json');
+  let remembered = {};
+  try {
+    remembered = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+  } catch {}
+  let info = { connected: false, webgpu: remembered.webgpu ?? null, gpu: remembered.gpu ?? null, cached: remembered.cached || [], loaded: null, loading: null, progress: null };
+  function remember() {
+    try {
+      fs.mkdirSync(HOME_DIR, { recursive: true });
+      fs.writeFileSync(stateFile, JSON.stringify({ webgpu: info.webgpu, gpu: info.gpu, cached: info.cached }));
+    } catch {}
+  }
   let launched = null;
   let lastLaunch = 0;
+  // Exactly one engine page does the work. Every page loads its own copy of the model into video
+  // memory, so two pages running the same job doubles memory and halves speed. When a new page
+  // connects (e.g. an old window reconnecting after Reroute restarted), the others are retired.
+  let active = null;
+
+  function write(res, event, data) {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
 
   function send(event, data) {
-    const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const res of pages) res.write(line);
+    if (active) write(active, event, data);
   }
 
   function launch({ visible = false } = {}) {
@@ -75,23 +95,29 @@ export function createEngineBridge(opts) {
 
   async function waitForPage(ms = 30_000) {
     const until = Date.now() + ms;
-    while (!pages.size && Date.now() < until) await new Promise((r) => setTimeout(r, 200));
-    return pages.size > 0;
+    while (!active && Date.now() < until) await new Promise((r) => setTimeout(r, 200));
+    return Boolean(active);
   }
 
   // Runs a chat on the engine. Returns an async iterable of OpenAI-style SSE text ("data: {...}\n\n"),
   // so the regular OpenAI -> Anthropic stream translation (and tool-call repair) applies as-is.
   async function chat(request, signal) {
-    if (!pages.size) {
-      launch();
-      if (!(await waitForPage())) throw Object.assign(new Error('the local engine window did not start'), { status: 503 });
+    if (!active) {
+      // An engine window that's already open reconnects by itself within a few seconds of Reroute
+      // starting; wait for it before opening another one.
+      if (!(await waitForPage(5000))) {
+        launch();
+        if (!(await waitForPage())) throw Object.assign(new Error('the local engine window did not start'), { status: 503 });
+      }
     }
     const id = crypto.randomBytes(6).toString('hex');
+    const page = active;
     const queue = [];
     let wake = null;
     let done = false;
     let error = null;
     pending.set(id, {
+      page,
       push: (s) => {
         queue.push(s);
         wake?.();
@@ -106,8 +132,8 @@ export function createEngineBridge(opts) {
         wake?.();
       },
     });
-    signal?.addEventListener('abort', () => send('cancel', { id }));
-    send('job', { id, ...request });
+    signal?.addEventListener('abort', () => !page.writableEnded && write(page, 'cancel', { id }));
+    write(page, 'job', { id, ...request });
     return (async function* () {
       try {
         for (;;) {
@@ -131,16 +157,20 @@ export function createEngineBridge(opts) {
     if (url.pathname === '/reroute/engine/events') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
       res.write(': connected\n\n');
+      // The newest page takes over; older ones are told to free their model and close.
+      for (const old of pages) write(old, 'retire', {});
       pages.add(res);
+      active = res;
       const ping = setInterval(() => res.write(': ping\n\n'), 15_000);
       req.on('close', () => {
         clearInterval(ping);
         pages.delete(res);
-        if (!pages.size) {
-          info = { ...info, connected: false, loaded: null, loading: null };
-          // Nothing can answer the jobs still in flight: fail them so Reroute moves on to another model.
-          for (const job of pending.values()) job.fail('the local engine window closed');
+        if (active === res) {
+          active = [...pages].pop() || null;
+          info = { ...info, connected: Boolean(active), loaded: null, loading: null };
         }
+        // Jobs that page was running can't finish: fail them so Reroute moves on to another model.
+        for (const job of pending.values()) if (job.page === res) job.fail('the local engine window closed');
       });
       return true;
     }
@@ -151,6 +181,7 @@ export function createEngineBridge(opts) {
     } catch {}
     if (url.pathname === '/reroute/engine/hello' || url.pathname === '/reroute/engine/state') {
       info = { ...info, ...body, connected: true };
+      if (body.cached || body.webgpu !== undefined) remember();
       res.writeHead(204).end();
       return true;
     }
@@ -175,13 +206,17 @@ export function createEngineBridge(opts) {
     waitForPage,
     // Ask the page to download (and load) a model, showing progress in the window.
     download(model) {
-      if (!pages.size) launch({ visible: true });
       const go = () => send('download', { model });
-      if (pages.size) go();
-      else waitForPage().then((ok) => ok && go());
+      if (active) return go();
+      // Give an open window a moment to reconnect before opening one.
+      waitForPage(5000).then((ok) => {
+        if (ok) return go();
+        launch({ visible: true });
+        waitForPage().then((ok2) => ok2 && go());
+      });
     },
     get info() {
-      return { ...info, connected: pages.size > 0, browser: findBrowser() };
+      return { ...info, connected: Boolean(active), browser: findBrowser() };
     },
     // Ends the engine page's event streams (it reconnects by itself, e.g. to a restarted Reroute).
     closePages() {
@@ -329,7 +364,35 @@ async function run(job) {
       callback_function: (text) => { if (text) push({ choices: [{ index: 0, delta: { content: text } }] }); },
       token_callback_function: () => { outTokens++; },
     });
-    await model.generate({ ...inputs, max_new_tokens: Math.max(16, Math.min(job.max_tokens || 2048, 8192)), do_sample: job.temperature > 0, temperature: job.temperature || undefined, streamer, stopping_criteria: stop });
+    // Read long prompts in chunks. All at once needs memory for every pair of tokens: on a 4B model
+    // that is ~2 GB at 4k tokens, which overflows ONNX Runtime's buffers or crawls on an 8 GB GPU.
+    // Chunks keep it to a few hundred MB at any length, reusing the cache between them.
+    const CHUNK = 512;
+    let past = null;
+    if (promptTokens > CHUNK) {
+      const ids = inputs.input_ids;
+      for (let s = 0; s < promptTokens - 1 && !stop.interrupted; s += CHUNK) {
+        const end = Math.min(s + CHUNK, promptTokens - 1);
+        $('#state').textContent = 'Reading the prompt: ' + end.toLocaleString() + ' / ' + promptTokens.toLocaleString() + ' tokens…';
+        const out = await model({ input_ids: ids.slice(null, [s, end]), attention_mask: t.ones([1, end]), past_key_values: past || undefined });
+        // The model returns its cache as present.* tensors; generate() expects them in a DynamicCache
+        // as past_key_values.* (the same renaming Transformers.js does inside generate).
+        const entries = {};
+        for (const name in out) {
+          if (name.startsWith('present')) entries[name.replace('present', 'past_key_values')] = out[name];
+          else if (out[name] && out[name].location === 'gpu-buffer') out[name].dispose();
+        }
+        if (past) past.update(entries);
+        else past = new t.DynamicCache(entries);
+      }
+      $('#state').textContent = 'Writing…';
+    }
+    try {
+      await model.generate({ ...inputs, past_key_values: past || undefined, max_new_tokens: Math.max(16, Math.min(job.max_tokens || 2048, 8192)), do_sample: job.temperature > 0, temperature: job.temperature || undefined, streamer, stopping_criteria: stop });
+    } finally {
+      // generate() keeps a cache it was handed; free its GPU memory ourselves.
+      if (past) await past.dispose();
+    }
     push({ choices: [{ index: 0, delta: {}, finish_reason: stop.interrupted ? 'stop' : outTokens >= (job.max_tokens || 2048) ? 'length' : 'stop' }] });
     push({ choices: [], usage: { prompt_tokens: promptTokens, completion_tokens: outTokens } });
     flush();
@@ -340,6 +403,12 @@ async function run(job) {
     log('error: ' + (e && e.message || e));
     await post('error/' + job.id, { message: String(e && e.message || e) });
     $('#state').textContent = 'Error: ' + (e && e.message || e);
+    // A GPU runtime error leaves ONNX Runtime's WebGPU state broken for every later request, even on
+    // other models. Reloading the page gives a fresh GPU device; the model reloads from the cache.
+    if (/OrtRun|WebGPU|GPUDevice|device (was )?lost|out of memory/i.test(String(e && e.message || e))) {
+      log('resetting the GPU engine after this error');
+      setTimeout(() => location.reload(), 300);
+    }
   } finally {
     cancels.delete(job.id);
   }
@@ -347,6 +416,14 @@ async function run(job) {
 
 const events = new EventSource('/reroute/engine/events');
 events.addEventListener('job', (e) => { const job = JSON.parse(e.data); busy = busy.then(() => run(job)); });
+events.addEventListener('retire', async () => {
+  // Another engine window took over: free this one's video memory and close.
+  events.close();
+  for (const c of cancels.values()) c.interrupt();
+  if (loaded) { try { await loaded.model.dispose(); } catch {} loaded = null; }
+  $('#state').textContent = 'Another Reroute engine window took over. You can close this one.';
+  window.close();
+});
 events.addEventListener('cancel', (e) => { const { id } = JSON.parse(e.data); cancels.get(id)?.interrupt(); });
 events.addEventListener('download', (e) => {
   const { model } = JSON.parse(e.data);

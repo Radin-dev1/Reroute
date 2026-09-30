@@ -9,6 +9,7 @@ import {
   fallbackCandidates,
   modelUsable,
   modelFromPickerId,
+  PICKER_PREFIX,
   pickerId,
   isCloudModel,
   isLocalModel,
@@ -435,6 +436,15 @@ export function createReroute(options = {}) {
     }
 
     const oreq = anthropicToOpenAI(body, upstreamModel, { maxTokens });
+    // REROUTE_DEBUG=1 saves the last request sent to an open model, to see exactly what it was given.
+    if (process.env.REROUTE_DEBUG) {
+      try {
+        const dir = path.join(HOME_DIR, 'debug');
+        fs.mkdirSync(dir, { recursive: true });
+        state.debugN = ((state.debugN || 0) % 10) + 1; // keeps the last 10
+        fs.writeFileSync(path.join(dir, `request-${state.debugN}.json`), JSON.stringify({ model: model.id, at: new Date().toISOString(), estimatedTokens: estimateTokens(body), request: oreq }, null, 2));
+      } catch {}
+    }
 
     if (provider.type === 'webgpu') {
       // Downloads are gigabytes: only ever start one when asked (reroute local download / dashboard).
@@ -617,6 +627,10 @@ export function createReroute(options = {}) {
     // Picked a Reroute model in Claude Code's /model menu: skip Claude entirely.
     const direct = modelFromPickerId(cfg, body.model);
     if (direct) return routeToFallback(res, body, signal, 'chosen in Claude Code', direct === 'auto' ? null : direct);
+    // A Reroute model ID we don't know (renamed or removed model): say so rather than sending it to Anthropic.
+    if (String(body.model || '').toLowerCase().startsWith(PICKER_PREFIX)) {
+      return anthropicError(res, 404, `Reroute doesn't have a model called "${body.model}". Pick one from /model again, or run: reroute sync`, 'not_found_error');
+    }
 
     if (inFallback()) return routeToFallback(res, body, signal, state.fallbackReason || `mode=${cfg.mode}`);
 

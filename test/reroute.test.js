@@ -285,3 +285,12 @@ test('classifier ignores ordinary errors', () => {
   assert.equal(classifyError(529, 'overloaded', {}, cfg).fallback, false);
   assert.equal(classifyError(429, '{}', { 'retry-after': '120' }, cfg).fallback, true);
 });
+
+test('an unknown Reroute model ID gets a clear error instead of going to Claude', async () => {
+  claudeMode = 'ok';
+  const hits = claudeHits;
+  const r = await post({ ...simple, model: 'claude-reroute-no-such-model' });
+  assert.equal(r.status, 404);
+  assert.match((await r.json()).error.message, /doesn't have a model called/);
+  assert.equal(claudeHits, hits, 'nothing was sent to Claude');
+});
