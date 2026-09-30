@@ -509,3 +509,50 @@ export function trimToFit(body, maxInputTokens) {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Skill list shrinking. Claude Code lists every installed skill with its full description in each
+// request ("The following skills are available for use with the Skill tool:" then "- name: description"
+// lines). With big skill collections that is 20k+ tokens. Open models get each description cut to a
+// short phrase; they still see every skill name, and the full skill loads when one is used.
+
+const SKILL_HEADER = 'The following skills are available for use with the Skill tool:';
+
+function shortenListing(text, maxDesc) {
+  const at = text.indexOf(SKILL_HEADER);
+  if (at < 0) return text;
+  const lines = text.slice(at).split('\n');
+  let i = 1;
+  while (i < lines.length && lines[i].trim() === '') i++;
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    // A blank line ends the list; other non-dash lines are a multi-line description, left as they are.
+    if (line.trim() === '') break;
+    if (!line.startsWith('- ')) continue;
+    // "- plugin:skill: description" — the description starts after the first ": " that follows the name.
+    const m = line.match(/^- (\S+?): (.*)$/);
+    if (!m || m[2].length <= maxDesc) continue;
+    let d = m[2];
+    const stop = d.search(/[.!?](\s|$)/);
+    d = stop > 15 && stop < maxDesc ? d.slice(0, stop + 1) : d.slice(0, maxDesc).replace(/\s+\S*$/, '') + '…';
+    lines[i] = `- ${m[1]}: ${d}`;
+  }
+  return text.slice(0, at) + lines.join('\n');
+}
+
+export function compressSkillListing(body, maxDesc = 70) {
+  let saved = 0;
+  const fix = (text) => {
+    if (typeof text !== 'string' || !text.includes(SKILL_HEADER)) return text;
+    const out = shortenListing(text, maxDesc);
+    saved += text.length - out.length;
+    return out;
+  };
+  const system = typeof body.system === 'string' ? fix(body.system) : Array.isArray(body.system) ? body.system.map((b) => (b?.type === 'text' ? { ...b, text: fix(b.text) } : b)) : body.system;
+  const messages = (body.messages || []).map((m) => {
+    if (typeof m.content === 'string') return { ...m, content: fix(m.content) };
+    if (!Array.isArray(m.content)) return m;
+    return { ...m, content: m.content.map((b) => (b?.type === 'text' ? { ...b, text: fix(b.text) } : b)) };
+  });
+  return saved > 0 ? { body: { ...body, system, messages }, saved } : { body, saved: 0 };
+}

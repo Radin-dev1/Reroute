@@ -21,6 +21,8 @@ import {
   CLAUDE_SETTINGS,
 } from '../src/install.js';
 import { PICKER_PREFIX } from '../src/config.js';
+import * as skills from '../src/skills.js';
+import readline from 'node:readline/promises';
 
 const HELP = `Reroute: use Claude until you run out, then switch to the best open-source model.
 
@@ -46,6 +48,12 @@ Usage: reroute <command>
   remove <id>          Remove a model you added
   pull <id>            Download a local Ollama model and give it a bigger context (e.g. reroute pull ollama-gemma4-e2b)
   notify <on|off>      Desktop notifications when Reroute switches models (default on)
+  skills [list]        Skill packs from github.com/alirezarezvani/claude-skills (~380 skills)
+  skills add <pack|plugin...> [--allow-hooks]
+                       Install a pack (coding, engineering, product, research, productivity,
+                       marketing, business, compliance, all) or single plugins
+  skills remove <pack|plugin...|all>
+  skills update        Get the latest skills from the collection
   mode <auto|claude|fallback>
                        auto: switch when credits run out (default)
                        claude: never switch; fallback: always use the open-source model
@@ -442,6 +450,112 @@ switch (cmd) {
     const ok = await doctor(args.includes('--fix'));
     // exitCode instead of exit(): exiting while sockets close trips a libuv assertion on Windows.
     process.exitCode = ok ? 0 : 1;
+    break;
+  }
+
+  case 'skills': {
+    const [sub = 'list', ...rest] = args;
+    const allowHooks = rest.includes('--allow-hooks');
+    const targets = rest.filter((a) => !a.startsWith('--'));
+    const tracked = new Set(readRawConfig().skillPlugins || []);
+    const saveTracked = () => saveConfig({ skillPlugins: [...tracked].sort() });
+    try {
+      if (sub === 'list') {
+        let plugins = null;
+        try {
+          plugins = skills.readMarketplace();
+        } catch {}
+        const installed = plugins ? skills.installedNames() : new Set();
+        console.log(`Skills from ${skills.SKILLS_HOME} (MIT, by Alireza Rezvani)\n`);
+        for (const [id, pack] of Object.entries(skills.PACKS)) {
+          const list = plugins ? skills.resolve([id], plugins).plugins : null;
+          const have = list ? list.filter((p) => installed.has(p.name)).length : 0;
+          const count = list ? ` ${have}/${list.length} plugins installed` : '';
+          console.log(`  ${id.padEnd(13)} ${pack.label}${count}`);
+        }
+        console.log(`\nInstall with: reroute skills add coding   (or any pack, several packs, or plugin names)`);
+        if (!plugins) console.log('The collection is downloaded the first time you add a pack.');
+        break;
+      }
+
+      if (sub === 'update') {
+        skills.ensureMarketplace({ refresh: true });
+        const have = skills.installedNames();
+        for (const name of tracked) if (have.has(name)) console.log(`  ${name}: ${skills.updatePlugin(name).ok ? 'updated' : 'update failed'}`);
+        console.log('Updated. Restart Claude Code to load the new versions.');
+        break;
+      }
+
+      if (sub === 'add') {
+        if (!targets.length) throw new Error('Usage: reroute skills add <pack|plugin...> [--allow-hooks]   (see reroute skills)');
+        console.log('Getting the skills collection…');
+        const plugins = skills.ensureMarketplace();
+        const { plugins: picked, unknown } = skills.resolve(targets, plugins);
+        if (unknown.length) console.log(`Not found: ${unknown.join(', ')} (packs: ${Object.keys(skills.PACKS).join(', ')})`);
+        let chosen = picked;
+        const withHooks = picked.filter((p) => p.hooks);
+        if (withHooks.length && !allowHooks) {
+          console.log(`\n${withHooks.length} of these run hooks (code that runs automatically during your sessions): ${withHooks.map((p) => p.name).join(', ')}`);
+          let yes = false;
+          if (process.stdin.isTTY) {
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            yes = /^y/i.test(await rl.question('Install those too? [y/N] '));
+            rl.close();
+          } else console.log('Skipping them. Add --allow-hooks to include them.');
+          if (!yes) chosen = picked.filter((p) => !p.hooks);
+        }
+        const have = skills.installedNames();
+        let added = 0;
+        const failed = [];
+        for (const p of chosen) {
+          if (have.has(p.name)) continue;
+          process.stdout.write(`  installing ${p.name}… `);
+          const r = skills.installPlugin(p.name);
+          console.log(r.ok ? 'done' : 'failed');
+          if (r.ok) {
+            added++;
+            tracked.add(p.name);
+          } else failed.push(`${p.name}: ${r.out.split('\n').pop()}`);
+        }
+        saveTracked();
+        const already = chosen.length - added - failed.length;
+        console.log(`\nInstalled ${added} plugins${already ? ` (${already} were already installed)` : ''}.`);
+        if (failed.length) console.log(`Failed:\n  ${failed.join('\n  ')}`);
+        if (added && added <= 15) {
+          const cost = chosen.filter((p) => tracked.has(p.name)).reduce((sum, p) => sum + skills.alwaysOnTokens(p.name), 0);
+          console.log(`Claude Code estimates they add ~${cost.toLocaleString()} tokens to every session.`);
+        } else if (added) {
+          console.log('A big set adds a lot to every session (everything is ~25k tokens). Reroute shortens the skill list when an open model answers.');
+        }
+        console.log('Restart Claude Code (terminal and desktop app) to load them.');
+        break;
+      }
+
+      if (sub === 'remove') {
+        if (!targets.length) throw new Error('Usage: reroute skills remove <pack|plugin...|all>');
+        const plugins = skills.readMarketplace();
+        const { plugins: picked } = skills.resolve(targets, plugins);
+        const have = skills.installedNames();
+        let removed = 0;
+        for (const p of picked) {
+          // Packs only remove what Reroute installed; naming a plugin removes it either way.
+          if (!have.has(p.name) || (!targets.includes(p.name) && !tracked.has(p.name))) continue;
+          const r = skills.uninstallPlugin(p.name);
+          if (r.ok) {
+            removed++;
+            tracked.delete(p.name);
+          } else console.log(`  ${p.name}: ${r.out.split('\n').pop()}`);
+        }
+        saveTracked();
+        console.log(`Removed ${removed} plugins. Restart Claude Code to unload them.`);
+        break;
+      }
+
+      throw new Error(`Unknown: reroute skills ${sub}. Use list, add, remove or update.`);
+    } catch (e) {
+      console.error(e.message);
+      process.exitCode = 1;
+    }
     break;
   }
 

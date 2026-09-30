@@ -12,6 +12,7 @@ Reroute is a tiny local proxy for **Claude Code**: the terminal CLI and the Code
 - **Fits the conversation to the model**: skips models whose context window is too small, and trims the oldest turns if nothing fits.
 - **Stays up**: a watchdog restarts it, and Claude Code itself starts it when a session opens.
 - **Tells you when it switches**: desktop notifications, plus a status line under the Claude Code prompt.
+- **380+ skills, one command**: installs packs from [alirezarezvani/claude-skills](https://github.com/alirezarezvani/claude-skills) into Claude Code.
 - The open-source models show up in Claude Code's **model menu** (`/model` in the terminal, the model picker in the desktop app), so you can switch to one any time.
 - Dashboard at `http://127.0.0.1:4747/` to switch models and modes.
 
@@ -137,6 +138,37 @@ Claude Code is built around Claude, so Reroute smooths over the ways other model
 - **Failed streams move on.** If a model fails before sending anything (an error event, an empty reply), Reroute tries the next one. Nothing has reached Claude Code yet, so you never see the failure.
 - **Your Ollama plan is checked at startup.** Ollama Cloud models your plan doesn't include are skipped from the start, with a free 1-token check.
 
+## Skills
+
+Reroute can install skills from [alirezarezvani/claude-skills](https://github.com/alirezarezvani/claude-skills) (MIT, by Alireza Rezvani): about 99 plugins with 380+ skills, agents and slash commands. It uses Claude Code's own plugin system (`claude plugin install`), so they show up like any other plugin, update from the original repo, and keep working even if you uninstall Reroute.
+
+```bash
+reroute skills                     # list the packs and what's installed
+reroute skills add coding          # recommended starter pack
+reroute skills add research productivity
+reroute skills add all             # everything
+reroute skills add grill-me roast  # single plugins by name
+reroute skills remove coding       # removes only what Reroute installed
+reroute skills update              # latest versions
+```
+
+| Pack | Plugins | What's in it |
+|---|---|---|
+| `coding` | 12 | Engineering essentials, Karpathy coding discipline, zero-hallucination coder, grill-me, handoffs, code tours, Docker, a11y, skill authoring |
+| `engineering` | 47 | Everything engineering: architecture, DevOps, security, data, Playwright, agents, SRE, Kubernetes, Terraform |
+| `product` | 6 | Product and project management, code-to-PRD, Apple HIG |
+| `research` | 11 | Deep research, literature reviews, patents, due diligence, NotebookLM |
+| `productivity` | 11 | Handoffs, weekly review, deep work, email triage, meetings |
+| `marketing` | 6 | Content, SEO and AEO, CRO, LinkedIn, landing pages, video |
+| `business` | 14 | C-level advisors, finance, sales, operations |
+| `compliance` | 4 | ISO 13485/42001, EU AI Act, MedTech QMS |
+| `all` | 99 | All of the above |
+
+Good to know:
+
+- **Cost.** Every installed skill's name and short description is sent with each Claude Code request. Claude Code estimates the `coding` pack at ~2k tokens per session and everything at ~25k, which counts toward your Claude limit. When an open-source model answers, Reroute shortens the descriptions to save room. The names stay, and the full skill still loads when it's used.
+- **Hooks.** Seven plugins run hooks (code that runs automatically during your sessions): `pw`, `self-improving-agent`, `handoff-productivity`, `security-guidance`, `skillopt-sleep`, `agent-launcher-skills`, `agent-memory`. Reroute asks before installing them; add `--allow-hooks` to skip the question.
+
 ## When does it switch?
 
 | Claude replies with | Reroute does |
@@ -162,6 +194,7 @@ reroute mode fallback   # always use the open-source model
 reroute install | uninstall | claude [args] | start | daemon | stop | status | doctor [--fix] | open | logs
 reroute models | use <id|auto> | backups <on|off> | add | remove | pull <id> | picker <ready|all|off> | sync
 reroute mode <auto|claude|fallback> | key <provider> <key> | reset | notify <on|off> | statusline
+reroute skills [list | add <pack|plugin...> [--allow-hooks] | remove <pack|plugin...> | update]
 ```
 
 ## Config
@@ -196,7 +229,7 @@ Provider `type` is `openai` (any `/chat/completions` API; Reroute translates to 
 npm test
 ```
 
-The tests start fake Claude and fake open-source servers and check the switch-over, the cooldowns, backups, the model menu, translating streaming tool calls, tool-call repair, context fitting and stream retries.
+The tests start fake Claude and fake open-source servers and check the switch-over, the cooldowns, backups, the model menu, translating streaming tool calls, tool-call repair, context fitting, stream retries, skill packs and skill-list shortening.
 
 ## License
 

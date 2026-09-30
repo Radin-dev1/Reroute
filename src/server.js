@@ -17,7 +17,7 @@ import {
   LOG_PATH,
 } from './config.js';
 import { classifyError } from './detect.js';
-import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf } from './translate.js';
+import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf, compressSkillListing } from './translate.js';
 import { notify as desktopNotify } from './notify.js';
 import { dashboardHtml } from './dashboard.js';
 
@@ -44,6 +44,7 @@ export function createReroute(options = {}) {
     fallbackUntil: 0,
     fallbackReason: '',
     requests: { claude: 0, fallback: 0 },
+    skillCharsSaved: 0,
     lastRoute: null,
     events: [],
     ollamaModels: null,
@@ -360,6 +361,10 @@ export function createReroute(options = {}) {
 
   // first: a model chosen in Claude Code's /model picker; it goes ahead of everything else.
   async function routeToFallback(res, body, signal, why, first = null) {
+    // Shorter skill descriptions for open models (Claude still gets the full list).
+    const shrunk = compressSkillListing(body);
+    body = shrunk.body;
+    state.skillCharsSaved += shrunk.saved;
     const bad = skipped();
     // Anything that refused recently (including your pick) goes to the back of the line.
     let list = (await candidates()).sort((x, y) => (bad.has(x.id) ? 1 : 0) - (bad.has(y.id) ? 1 : 0));
@@ -507,6 +512,7 @@ export function createReroute(options = {}) {
       lastRoute: state.lastRoute,
       startedAt: state.startedAt,
       supervised: Boolean(process.env.REROUTE_SUPERVISED),
+      skillTokensSaved: Math.round(state.skillCharsSaved / 3.5),
       events: state.events.slice(0, 20),
       cooldownMinutes: cfg.cooldownMinutes,
       models: cfg.models.map((m) => {
