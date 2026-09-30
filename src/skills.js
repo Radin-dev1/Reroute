@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFile, exec } from 'node:child_process';
 
 export const MARKETPLACE = 'claude-code-skills';
 // HTTPS, not owner/repo: the shorthand clones over SSH, which fails without a GitHub SSH key.
@@ -47,6 +47,20 @@ export const PACKS = {
 
 export function runClaude(args) {
   return claude(args);
+}
+
+// Same as runClaude, but doesn't block: for use inside the proxy, which must keep serving requests.
+export function runClaudeAsync(args) {
+  const opts = { encoding: 'utf8', windowsHide: true, timeout: 600_000, maxBuffer: 20 * 1024 * 1024 };
+  const done = (resolve) => (err, stdout, stderr) => resolve({ ok: !err, out: `${stdout || ''}${stderr || ''}`.trim() || String(err?.message || ''), code: err?.code });
+  return new Promise((resolve) => {
+    execFile('claude', args, opts, (err, stdout, stderr) => {
+      if (err?.code === 'ENOENT' && process.platform === 'win32' && args.every((a) => /^[\w.@:/-]+$/.test(a))) {
+        return exec(['claude', ...args].join(' '), opts, done(resolve));
+      }
+      done(resolve)(err, stdout, stderr);
+    });
+  });
 }
 
 function claude(args) {

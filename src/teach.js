@@ -13,12 +13,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { htmlToText } from './tor.js';
 
 export const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 export const SKILLS_DIR = path.join(CLAUDE_DIR, 'skills');
 const MARKER = '.reroute-source.json';
+const execFileAsync = promisify(execFile);
 
 const MAX_FILE = 400_000; // characters per reference file
 const MAX_TOTAL = 3_000_000; // characters per skill
@@ -123,7 +125,21 @@ export function parseSource(input) {
 // ---------------------------------------------------------------------------
 // Writing skills
 
-function writeSkill({ name, description, body, references = [], source, type, copyDir = null }) {
+// A folder name that won't clobber anything: re-teaching the same source replaces Reroute's own copy,
+// but a skill you made or installed some other way is never touched (the new one gets "-2", "-3"...).
+function freeName(name, source) {
+  for (let i = 1; ; i++) {
+    const candidate = i === 1 ? name : `${name}-${i}`;
+    const dir = path.join(SKILLS_DIR, candidate);
+    if (!fs.existsSync(dir)) return candidate;
+    try {
+      if (JSON.parse(fs.readFileSync(path.join(dir, MARKER), 'utf8')).source === source) return candidate;
+    } catch {}
+  }
+}
+
+function writeSkill({ name: wanted, description, body, references = [], source, type, copyDir = null }) {
+  const name = freeName(wanted, source);
   const dir = path.join(SKILLS_DIR, name);
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
@@ -240,7 +256,8 @@ async function fromGithub(src, opts, runClaude) {
   try {
     const args = ['clone', '-q', '--depth', '1'];
     if (src.ref) args.push('--branch', src.ref);
-    execFileSync('git', [...args, url, tmp], { stdio: 'pipe', windowsHide: true, timeout: 300_000 });
+    // Async: this runs inside the proxy too, which must keep serving Claude Code while a big repo clones.
+    await execFileAsync('git', [...args, url, tmp], { windowsHide: true, timeout: 300_000, maxBuffer: 10 * 1024 * 1024 });
   } catch (e) {
     fs.rmSync(tmp, { recursive: true, force: true });
     throw new Error(`couldn't download ${url}: ${String(e.stderr || e.message).trim().split('\n').pop()}`);
@@ -255,7 +272,7 @@ async function fromGithub(src, opts, runClaude) {
     const mk = path.join(tmp, '.claude-plugin', 'marketplace.json');
     if (!src.sub && fs.existsSync(mk) && runClaude) {
       const j = JSON.parse(fs.readFileSync(mk, 'utf8'));
-      const r = runClaude(['plugin', 'marketplace', 'add', url]);
+      const r = await runClaude(['plugin', 'marketplace', 'add', url]);
       if (!r.ok && !/already/i.test(r.out)) throw new Error(`couldn't add the marketplace: ${r.out.split('\n').pop()}`);
       return { type: 'marketplace', marketplace: j.name, plugins: (j.plugins || []).map((p) => ({ name: p.name, description: p.description || '' })), source };
     }

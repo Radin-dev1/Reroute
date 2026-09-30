@@ -70,8 +70,10 @@ export function startJob({ task, model = null, cwd = process.cwd(), worktree = '
   if (useWorktree) {
     if (!root) throw new Error(`${cwd} is not a git repository, so jobs can't get their own worktree. Run without --worktree.`);
     branch = `reroute/job-${id}`;
-    workdir = path.join(path.dirname(root), `${path.basename(root)}-job-${id}`);
-    execFileSync('git', ['worktree', 'add', '-q', '-b', branch, workdir], { cwd: root, stdio: 'ignore', windowsHide: true });
+    const tree = path.join(path.dirname(root), `${path.basename(root)}-job-${id}`);
+    execFileSync('git', ['worktree', 'add', '-q', '-b', branch, tree], { cwd: root, stdio: 'ignore', windowsHide: true });
+    // Started from a subfolder (e.g. apps/web in a monorepo): work in the same subfolder of the copy.
+    workdir = path.join(tree, path.relative(root, fs.realpathSync(cwd)));
   }
   const job = { id, task, model, cwd, workdir, branch, allowBash, port, status: 'running', createdAt: Date.now(), startedAt: null, endedAt: null, result: null, error: null, costUsd: null };
   writeJob(job);
@@ -86,6 +88,8 @@ export function startJob({ task, model = null, cwd = process.cwd(), worktree = '
 export function runJob(id, { onDone } = {}) {
   const job = readJob(id);
   if (!job) process.exit(1);
+  // Record our own pid: the parent writes it too, but may do so after we read the file.
+  job.runnerPid = process.pid;
   // Say where to work: models otherwise sometimes guess paths outside the job's folder.
   const task = `${job.task}
 

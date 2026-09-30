@@ -22,7 +22,7 @@ import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimate
 import { notify as desktopNotify } from './notify.js';
 import { createEngineBridge, enginePageHtml } from './engine.js';
 import { teach, listTaught, forget } from './teach.js';
-import { runClaude } from './skills.js';
+import { runClaudeAsync } from './skills.js';
 import { checkForUpdate, applyUpdate, currentVersion } from './update.js';
 import { pickerRows } from './picker.js';
 import { setPickerRows } from './install.js';
@@ -45,6 +45,9 @@ const HOP_BY_HOP = new Set([
   'content-length',
   'accept-encoding',
 ]);
+
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+const LOCAL_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
 
 export function createReroute(options = {}) {
   let cfg = loadConfig();
@@ -170,13 +173,19 @@ export function createReroute(options = {}) {
   async function installUpdate() {
     updating = true;
     try {
-      const r = applyUpdate();
+      const r = await applyUpdate();
       log(`Updated Reroute ${r.from.commit} -> ${r.to.commit}`);
       state.update = { available: false, checkedAt: Date.now(), current: r.to, justUpdated: r };
       if (process.env.REROUTE_SUPERVISED) {
         notify('Reroute updated', `Now on ${r.to.version} (${r.to.commit}). Restarting in the background.`);
-        // Finish what's in flight, then exit with 75 so the watchdog starts the new code immediately.
-        setTimeout(() => server.close(() => process.exit(75)), 300).unref();
+        // Stop taking new connections and drop idle ones (and the engine page's event stream, which
+        // reconnects to the new version by itself); exit with 75 once in-flight replies finish, so the
+        // watchdog starts the new code right away. Give up waiting after 30 s.
+        setTimeout(() => {
+          server.close(() => process.exit(75));
+          server.closeIdleConnections?.();
+          engine.closePages();
+        }, 300).unref();
         setTimeout(() => process.exit(75), 30_000).unref();
       } else {
         notify('Reroute updated', `Now on ${r.to.version} (${r.to.commit}). Restart Reroute to use it: reroute stop, then reroute start.`);
@@ -428,6 +437,10 @@ export function createReroute(options = {}) {
     const oreq = anthropicToOpenAI(body, upstreamModel, { maxTokens });
 
     if (provider.type === 'webgpu') {
+      // Downloads are gigabytes: only ever start one when asked (reroute local download / dashboard).
+      if (!(engine.info.cached || []).includes(model.model)) {
+        return { failed: { status: 404, message: `${model.label} isn't downloaded yet (${model.sizeGb} GB). Download it with: reroute local download ${model.id}`, type: 'not_found_error' } };
+      }
       let stream;
       try {
         stream = await engine.chat(
@@ -658,12 +671,20 @@ export function createReroute(options = {}) {
     return routeToFallback(res, body, signal, verdict.reason);
   }
 
+  // The job list reads a file per job; the dashboard and status line poll often, so reuse it briefly.
+  let jobsCache = { at: 0, list: [] };
+  function recentJobs() {
+    if (Date.now() - jobsCache.at > 3000) jobsCache = { at: Date.now(), list: listJobs().slice(0, 30) };
+    return jobsCache.list;
+  }
+
   async function statusPayload() {
     const fb = await currentFallback();
     const oll = await usableEnv();
     const selfHosted = {};
     for (const [name, p] of Object.entries(cfg.providers)) {
-      if (name !== 'ollama' && p.keyless && !providerKey(cfg, name)) selfHosted[name] = await selfHostedUp(name);
+      // Only servers you run yourself; the WebGPU engine has no URL and reports its own state.
+      if (name !== 'ollama' && p.type === 'openai' && p.baseUrl && p.keyless && !providerKey(cfg, name)) selfHosted[name] = await selfHostedUp(name);
     }
     return {
       name: 'reroute',
@@ -699,7 +720,7 @@ export function createReroute(options = {}) {
         statusLine: { usage: true, reset: true, update: true, ...(cfg.statusLine || {}) },
         usageWarnPercent: cfg.usageWarnPercent ?? 80,
       },
-      jobs: listJobs().slice(0, 30),
+      jobs: recentJobs(),
       events: state.events.slice(0, 20),
       cooldownMinutes: cfg.cooldownMinutes,
       models: cfg.models.map((m) => {
@@ -735,9 +756,6 @@ export function createReroute(options = {}) {
   async function handleApi(req, res, url) {
     if (url.pathname === '/reroute/api/status') return sendJson(res, 200, await statusPayload());
     if (url.pathname === '/reroute/api/config' && req.method === 'POST') {
-      // Only accept same-origin requests from the dashboard; block cross-site form posts.
-      const origin = req.headers.origin;
-      if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) return sendJson(res, 403, { error: 'forbidden' });
       let patch;
       try {
         patch = JSON.parse((await readBody(req)).toString('utf8'));
@@ -765,12 +783,6 @@ export function createReroute(options = {}) {
       if (allowed.fallbackModel) log(`Fallback model set to ${allowed.fallbackModel}`);
       return sendJson(res, 200, await statusPayload());
     }
-    const sameOrigin = () => {
-      const origin = req.headers.origin;
-      return !origin || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
-    };
-    if (req.method === 'POST' && !sameOrigin()) return sendJson(res, 403, { error: 'forbidden' });
-
     if (url.pathname === '/reroute/api/taught') return sendJson(res, 200, { skills: listTaught() });
     if (url.pathname === '/reroute/api/teach' && req.method === 'POST') {
       let b = {};
@@ -778,10 +790,11 @@ export function createReroute(options = {}) {
         b = JSON.parse((await readBody(req)).toString('utf8'));
       } catch {}
       try {
-        const r = await teach(b.source, { name: b.name || undefined, description: b.description || undefined, rows: b.rows, token: providerKey(cfg, 'huggingface'), runClaude });
+        const r = await teach(b.source, { name: b.name || undefined, description: b.description || undefined, rows: b.rows, token: providerKey(cfg, 'huggingface'), runClaude: runClaudeAsync });
         if (r.type === 'marketplace' && b.install) {
           const pick = b.install === 'all' ? r.plugins : r.plugins.filter((p) => String(b.install).split(',').includes(p.name));
-          r.installed = pick.map((p) => ({ name: p.name, ok: runClaude(['plugin', 'install', `${p.name}@${r.marketplace}`]).ok }));
+          r.installed = [];
+          for (const p of pick) r.installed.push({ name: p.name, ok: (await runClaudeAsync(['plugin', 'install', `${p.name}@${r.marketplace}`])).ok });
         }
         log(`Taught Claude from ${b.source}: ${r.type}${r.skills ? ' (' + r.skills.map((x) => x.name).join(', ') + ')' : ''}`);
         return sendJson(res, 200, r);
@@ -894,6 +907,12 @@ export function createReroute(options = {}) {
       if (!res.writableFinished) ac.abort();
     });
     try {
+      // Only this machine may use Reroute. A Host check stops DNS-rebinding pages (evil.com resolving
+      // to 127.0.0.1); an Origin check stops other websites from sending requests through it.
+      // Claude Code sends no Origin; the dashboard and engine page send a local one.
+      const host = String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase();
+      const origin = req.headers.origin;
+      if (!LOCAL_HOSTS.has(host) || (origin && !LOCAL_ORIGIN.test(origin))) return sendJson(res, 403, { error: 'Reroute only accepts requests from this computer' });
       const url = new URL(req.url, 'http://localhost');
       if (url.pathname === '/' || url.pathname === '/reroute' || url.pathname === '/reroute/') {
         if (req.method === 'GET' && !req.headers['x-api-key'] && !req.headers['anthropic-version']) {
@@ -906,9 +925,6 @@ export function createReroute(options = {}) {
         return res.end(enginePageHtml());
       }
       if (url.pathname.startsWith('/reroute/engine/')) {
-        // Only the engine page (same origin) may talk to the engine endpoints.
-        const origin = req.headers.origin;
-        if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) return sendJson(res, 403, { error: 'forbidden' });
         if (await engine.handle(req, res, url, readBody)) return;
         return sendJson(res, 404, { error: 'not found' });
       }

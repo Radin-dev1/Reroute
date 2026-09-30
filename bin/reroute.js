@@ -786,7 +786,7 @@ switch (cmd) {
         if (r.error) throw new Error(r.error);
         console.log(`Updated to ${r.current?.version} (${r.current?.commit}).${(await running())?.supervised ? ' Reroute restarts itself with it now.' : ' Restart Reroute to use it.'}`);
       } else {
-        const r = applyUpdate();
+        const r = await applyUpdate();
         console.log(`Updated to ${r.to.version} (${r.to.commit}).`);
       }
     } catch (e) {

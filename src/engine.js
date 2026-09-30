@@ -136,7 +136,11 @@ export function createEngineBridge(opts) {
       req.on('close', () => {
         clearInterval(ping);
         pages.delete(res);
-        if (!pages.size) info = { ...info, connected: false };
+        if (!pages.size) {
+          info = { ...info, connected: false, loaded: null, loading: null };
+          // Nothing can answer the jobs still in flight: fail them so Reroute moves on to another model.
+          for (const job of pending.values()) job.fail('the local engine window closed');
+        }
       });
       return true;
     }
@@ -178,6 +182,10 @@ export function createEngineBridge(opts) {
     },
     get info() {
       return { ...info, connected: pages.size > 0, browser: findBrowser() };
+    },
+    // Ends the engine page's event streams (it reconnects by itself, e.g. to a restarted Reroute).
+    closePages() {
+      for (const res of pages) res.end();
     },
   };
 }

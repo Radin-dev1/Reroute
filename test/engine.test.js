@@ -112,3 +112,49 @@ test('local-only mode refuses cloud models even when picked', async () => {
   assert.notEqual(s.resolvedFallback?.provider, 'openrouter');
   assert.match(s.models.find((m) => m.id === 'kimi-k3').needs, /local-only/);
 });
+
+test('only this computer can use Reroute: other hosts and origins are refused', async () => {
+  const app = createReroute({ quiet: true, notify: false, probe: false, updates: false });
+  const port = await app.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const http = await import('node:http');
+  const raw = (headers) =>
+    new Promise((resolve) => {
+      const r = http.request({ host: '127.0.0.1', port, path: '/reroute/api/status', headers }, (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      r.end();
+    });
+  assert.equal(await raw({ host: `evil.example:${port}` }), 403, 'DNS-rebinding Host is refused');
+  assert.equal((await fetch(base + '/v1/messages', { method: 'POST', headers: { origin: 'https://evil.example' }, body: '{}' })).status, 403, 'other websites are refused');
+  assert.equal((await fetch(base + '/reroute/api/status', { headers: { origin: base } })).status, 200, 'the dashboard itself works');
+  assert.equal((await fetch(base + '/reroute/api/status')).status, 200, 'Claude Code (no Origin) works');
+  await app.close();
+});
+
+test('downloaded WebGPU models show as usable; undownloaded ones never start a hidden download', async () => {
+  const app = createReroute({ quiet: true, notify: false, probe: false, updates: false });
+  app.config.mode = 'fallback';
+  app.config.localOnly = true;
+  app.config.backups = false;
+  app.config.fallbackModel = 'webgpu-gemma4-e4b';
+  const port = await app.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const seen = [];
+  const stop = await fakeEnginePage(base, seen);
+  const s = await (await fetch(base + '/reroute/api/status')).json();
+  assert.equal(s.models.find((m) => m.id === 'webgpu-qwen3-4b').usable, true, 'downloaded model is usable in status');
+  assert.match(s.models.find((m) => m.id === 'webgpu-gemma4-e4b').needs, /download/);
+  const r = await fetch(base + '/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'claude-reroute-webgpu-gemma4-e4b', max_tokens: 100, messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  const j = await r.json();
+  stop();
+  await app.close();
+  assert.equal(r.status, 404);
+  assert.match(j.error.message, /isn't downloaded yet/);
+  assert.equal(seen.length, 0, 'no job (and so no download) was sent to the engine');
+});
