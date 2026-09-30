@@ -424,6 +424,12 @@ export function fallbackCandidates(cfg, ollama = null, skip = new Set()) {
     if (m === picked || m.autoPick === false || skip.has(m.id)) continue;
     if (modelUsable(cfg, m, ollama)) list.push(m);
   }
+  // With cloud models allowed, the models on this GPU are the slow last resort: much faster and
+  // stronger cloud models go first. (In local-only mode they're all there is.)
+  if (cfg.localOnly === false) {
+    const onGpu = (m) => m.provider === 'webgpu';
+    list.sort((a, b) => Number(onGpu(a)) - Number(onGpu(b)));
+  }
   if (picked) {
     // Your pick goes first when it's ready; if it isn't (not pulled, no key) it's tried last.
     if (modelUsable(cfg, picked, ollama)) list.unshift(picked);
