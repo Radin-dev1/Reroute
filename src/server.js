@@ -19,6 +19,14 @@ import {
 import { classifyError } from './detect.js';
 import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf, compressSkillListing } from './translate.js';
 import { notify as desktopNotify } from './notify.js';
+import { checkForUpdate, applyUpdate, currentVersion } from './update.js';
+import { pickerRows } from './picker.js';
+import { setPickerRows } from './install.js';
+import { listJobs, startJob, stopJob, readJob, logFile } from './jobs.js';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const CLI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'reroute.js');
 import { dashboardHtml } from './dashboard.js';
 
 const HOP_BY_HOP = new Set([
@@ -51,6 +59,10 @@ export function createReroute(options = {}) {
     ollamaCheckedAt: 0,
     badModels: new Map(),
     planRefused: new Set(), // Ollama Cloud models your plan does not include (checked at startup)
+    usage: null, // latest Claude plan usage from Anthropic's rate-limit headers
+    usageWarned: 0,
+    update: { available: false, checkedAt: 0 },
+    savedByQuotaSaver: 0,
     onFallback: false, // told the user we switched; tell them again when Claude is back
     lastNoFallbackNotice: 0,
   };
@@ -118,6 +130,49 @@ export function createReroute(options = {}) {
     return new Set([...state.badModels.keys(), ...state.planRefused]);
   }
 
+  // Checks GitHub for a newer Reroute. With autoUpdate on (default) it installs it and restarts:
+  // the watchdog starts the new version right away. Without the watchdog it just says an update is ready.
+  let updating = false;
+  async function updateCheck({ install = cfg.autoUpdate !== false } = {}) {
+    if (updating) return state.update;
+    try {
+      const r = await checkForUpdate();
+      state.update = { ...r, checkedAt: Date.now(), current: currentVersion() };
+      if (r.available && install) return await installUpdate();
+      if (r.available && !state.update.told) {
+        state.update.told = true;
+        notify('Reroute update available', `${r.latest?.subject || 'A new version is on GitHub'}. Update from the dashboard or run: reroute update`);
+      }
+    } catch (e) {
+      state.update = { ...state.update, checkedAt: Date.now(), error: e.message };
+    }
+    return state.update;
+  }
+
+  async function installUpdate() {
+    updating = true;
+    try {
+      const r = applyUpdate();
+      log(`Updated Reroute ${r.from.commit} -> ${r.to.commit}`);
+      state.update = { available: false, checkedAt: Date.now(), current: r.to, justUpdated: r };
+      if (process.env.REROUTE_SUPERVISED) {
+        notify('Reroute updated', `Now on ${r.to.version} (${r.to.commit}). Restarting in the background.`);
+        // Finish what's in flight, then exit with 75 so the watchdog starts the new code immediately.
+        setTimeout(() => server.close(() => process.exit(75)), 300).unref();
+        setTimeout(() => process.exit(75), 30_000).unref();
+      } else {
+        notify('Reroute updated', `Now on ${r.to.version} (${r.to.commit}). Restart Reroute to use it: reroute stop, then reroute start.`);
+      }
+      return state.update;
+    } catch (e) {
+      state.update = { ...state.update, error: e.message };
+      log(`update failed: ${e.message}`);
+      throw e;
+    } finally {
+      updating = false;
+    }
+  }
+
   // Ollama Cloud models your plan doesn't include answer 402 at once, and a refusal costs nothing.
   // Checking at startup keeps the model order right without wasting a real request on them.
   async function probeOllamaCloud() {
@@ -146,6 +201,7 @@ export function createReroute(options = {}) {
     };
     // Two at a time: bursts of parallel calls get errors that don't say whether a model is included.
     await Promise.all([worker(), worker()]);
+    state.planChecked = true;
     if (refused.length) log(`Your Ollama plan doesn't include ${refused.length} cloud models; skipping them: ${refused.join(', ')}`);
   }
 
@@ -161,6 +217,39 @@ export function createReroute(options = {}) {
     if (cfg.mode === 'fallback') return true;
     if (cfg.mode === 'claude') return false;
     return Date.now() < state.fallbackUntil;
+  }
+
+  // Anthropic reports your plan usage on every reply: 5-hour and weekly utilization and when each resets.
+  function recordUsage(headers) {
+    const h = (k) => headers.get(`anthropic-ratelimit-unified-${k}`);
+    const pct = (v) => {
+      if (v == null || v === '') return null;
+      const n = Number(v);
+      if (!Number.isFinite(n)) return null;
+      return Math.round((n <= 1 ? n * 100 : n) * 10) / 10;
+    };
+    const when = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? (n < 1e12 ? n * 1000 : n) : null;
+    };
+    const u = {
+      fiveHour: pct(h('5h-utilization')),
+      sevenDay: pct(h('7d-utilization')),
+      fiveHourReset: when(h('5h-reset')),
+      sevenDayReset: when(h('7d-reset')),
+      status: h('status'),
+      at: Date.now(),
+    };
+    if (u.fiveHour == null && u.sevenDay == null && !u.status) return;
+    state.usage = u;
+    const top = Math.max(u.fiveHour ?? 0, u.sevenDay ?? 0);
+    const warnAt = cfg.usageWarnPercent ?? 80;
+    if (top >= warnAt && Date.now() - state.usageWarned > 60 * 60_000) {
+      state.usageWarned = Date.now();
+      const which = (u.fiveHour ?? 0) >= (u.sevenDay ?? 0) ? '5-hour' : 'weekly';
+      const reset = which === '5-hour' ? u.fiveHourReset : u.sevenDayReset;
+      notify(`Claude ${which} limit at ${Math.round(top)}%`, `Reroute will switch to open-source models when it runs out${reset ? `; resets ${new Date(reset).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : ''}.`);
+    }
   }
 
   async function readBody(req) {
@@ -360,7 +449,7 @@ export function createReroute(options = {}) {
   }
 
   // first: a model chosen in Claude Code's /model picker; it goes ahead of everything else.
-  async function routeToFallback(res, body, signal, why, first = null) {
+  async function routeToFallback(res, body, signal, why, first = null, { quiet = false } = {}) {
     // Shorter skill descriptions for open models (Claude still gets the full list).
     const shrunk = compressSkillListing(body);
     body = shrunk.body;
@@ -414,7 +503,7 @@ export function createReroute(options = {}) {
         result = { failed: { status: 502, message: e.message, type: 'api_error' } };
       }
       if (!result?.failed) {
-        if (!state.onFallback && !first && cfg.mode === 'auto') {
+        if (!state.onFallback && !first && !quiet && cfg.mode === 'auto') {
           state.onFallback = true;
           const until = state.fallbackUntil ? new Date(state.fallbackUntil).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : null;
           notify(`Switched to ${model.label}`, `Claude is unavailable (${why.slice(0, 80)}).${until ? ` Back to Claude around ${until}.` : ''}`);
@@ -448,6 +537,13 @@ export function createReroute(options = {}) {
 
     if (inFallback()) return routeToFallback(res, body, signal, state.fallbackReason || `mode=${cfg.mode}`);
 
+    // Quota saver: Claude Code's small background calls (titles, summaries, quick checks) use Haiku.
+    // Sending those to a free open model makes your Claude limit last longer.
+    if (cfg.saveQuota && /haiku/i.test(String(body.model || '')) && (await currentFallback())) {
+      state.savedByQuotaSaver += 1;
+      return routeToFallback(res, body, signal, 'quota saver', null, { quiet: true });
+    }
+
     let upstream;
     try {
       upstream = await callClaude(req, bodyBuf, signal);
@@ -462,6 +558,7 @@ export function createReroute(options = {}) {
       return anthropicError(res, 502, `Reroute: can't reach Claude: ${e.message}`);
     }
 
+    recordUsage(upstream.headers);
     if (upstream.ok || cfg.mode === 'claude') {
       state.requests.claude += 1;
       state.lastRoute = { to: 'claude', at: Date.now() };
@@ -512,7 +609,24 @@ export function createReroute(options = {}) {
       lastRoute: state.lastRoute,
       startedAt: state.startedAt,
       supervised: Boolean(process.env.REROUTE_SUPERVISED),
+      planChecked: Boolean(state.planChecked),
       skillTokensSaved: Math.round(state.skillCharsSaved / 3.5),
+      version: currentVersion(),
+      usage: state.usage,
+      update: state.update,
+      saveQuota: Boolean(cfg.saveQuota),
+      savedByQuotaSaver: state.savedByQuotaSaver,
+      settings: {
+        notify: cfg.notify !== false,
+        autoUpdate: cfg.autoUpdate !== false,
+        saveQuota: Boolean(cfg.saveQuota),
+        picker: cfg.picker || 'ready',
+        pickerOrder: cfg.pickerOrder || [],
+        pickerHidden: cfg.pickerHidden || [],
+        statusLine: { usage: true, reset: true, update: true, ...(cfg.statusLine || {}) },
+        usageWarnPercent: cfg.usageWarnPercent ?? 80,
+      },
+      jobs: listJobs().slice(0, 30),
       events: state.events.slice(0, 20),
       cooldownMinutes: cfg.cooldownMinutes,
       models: cfg.models.map((m) => {
@@ -560,6 +674,15 @@ export function createReroute(options = {}) {
       if (typeof patch.fallbackModel === 'string') allowed.fallbackModel = patch.fallbackModel;
       if (typeof patch.backups === 'boolean') allowed.backups = patch.backups;
       if (Number.isFinite(patch.cooldownMinutes) && patch.cooldownMinutes > 0) allowed.cooldownMinutes = patch.cooldownMinutes;
+      for (const k of ['notify', 'autoUpdate', 'saveQuota']) if (typeof patch[k] === 'boolean') allowed[k] = patch[k];
+      if (['ready', 'all', 'off'].includes(patch.picker)) allowed.picker = patch.picker;
+      const ids = new Set(['auto', ...cfg.models.map((m) => m.id)]);
+      if (Array.isArray(patch.pickerOrder)) allowed.pickerOrder = patch.pickerOrder.filter((x) => ids.has(x));
+      if (Array.isArray(patch.pickerHidden)) allowed.pickerHidden = patch.pickerHidden.filter((x) => ids.has(x));
+      if (patch.statusLine && typeof patch.statusLine === 'object') {
+        allowed.statusLine = Object.fromEntries(['usage', 'reset', 'update'].filter((k) => typeof patch.statusLine[k] === 'boolean').map((k) => [k, patch.statusLine[k]]));
+      }
+      if (Number.isFinite(patch.usageWarnPercent) && patch.usageWarnPercent >= 10 && patch.usageWarnPercent <= 100) allowed.usageWarnPercent = patch.usageWarnPercent;
       saveConfig(allowed);
       refreshConfig();
       if (allowed.mode) log(`Mode set to ${allowed.mode}`);
@@ -567,6 +690,63 @@ export function createReroute(options = {}) {
       if (allowed.fallbackModel) log(`Fallback model set to ${allowed.fallbackModel}`);
       return sendJson(res, 200, await statusPayload());
     }
+    const sameOrigin = () => {
+      const origin = req.headers.origin;
+      return !origin || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
+    };
+    if (req.method === 'POST' && !sameOrigin()) return sendJson(res, 403, { error: 'forbidden' });
+
+    if (url.pathname === '/reroute/api/picker/sync' && req.method === 'POST') {
+      const status = await statusPayload();
+      const n = setPickerRows(pickerRows(status.models, cfg));
+      log(`Model menu updated: ${n} Reroute models`);
+      return sendJson(res, 200, { rows: n });
+    }
+    if (url.pathname === '/reroute/api/update/check' && req.method === 'POST') {
+      return sendJson(res, 200, await updateCheck({ install: false }));
+    }
+    if (url.pathname === '/reroute/api/update/install' && req.method === 'POST') {
+      try {
+        return sendJson(res, 200, await installUpdate());
+      } catch (e) {
+        return sendJson(res, 409, { error: e.message });
+      }
+    }
+    if (url.pathname === '/reroute/api/jobs' && req.method === 'POST') {
+      let b;
+      try {
+        b = JSON.parse((await readBody(req)).toString('utf8'));
+      } catch {
+        return sendJson(res, 400, { error: 'bad json' });
+      }
+      const tasks = (Array.isArray(b.tasks) ? b.tasks : [b.task]).map((t) => String(t || '').trim()).filter(Boolean);
+      if (!tasks.length) return sendJson(res, 400, { error: 'no task' });
+      if (!b.cwd || !fs.existsSync(b.cwd)) return sendJson(res, 400, { error: 'folder not found' });
+      const m = b.model && b.model !== 'claude' ? cfg.models.find((x) => x.id === b.model) : null;
+      try {
+        const jobs = tasks.map((task) =>
+          startJob({ task, model: b.model === 'auto' ? 'claude-reroute-auto' : m ? pickerId(m) : null, cwd: b.cwd, worktree: 'auto', allowBash: Boolean(b.allowBash), cliPath: CLI_PATH, port: cfg.port, batchSize: tasks.length })
+        );
+        log(`Started ${jobs.length} agent job(s)`);
+        return sendJson(res, 200, { jobs });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+    }
+    const jobMatch = url.pathname.match(/^\/reroute\/api\/jobs\/([a-f0-9]{6})(\/stop|\/log)?$/);
+    if (jobMatch) {
+      const [, id, action] = jobMatch;
+      if (action === '/stop' && req.method === 'POST') return sendJson(res, 200, stopJob(id) || { error: 'not found' });
+      if (action === '/log') {
+        let text = '';
+        try {
+          text = fs.readFileSync(logFile(id), 'utf8').slice(-200_000);
+        } catch {}
+        return sendJson(res, 200, { log: text });
+      }
+      return sendJson(res, 200, readJob(id) || { error: 'not found' });
+    }
+
     if (url.pathname === '/reroute/api/reset' && req.method === 'POST') {
       state.fallbackUntil = 0;
       state.fallbackReason = '';
@@ -638,6 +818,10 @@ export function createReroute(options = {}) {
           if (options.probe !== false) {
             setTimeout(() => probeOllamaCloud().catch(() => {}), 500).unref();
             setInterval(() => probeOllamaCloud().catch(() => {}), 6 * 3600_000).unref();
+          }
+          if (options.updates !== false && !process.env.REROUTE_NO_UPDATE) {
+            setTimeout(() => updateCheck().catch(() => {}), 20_000).unref();
+            setInterval(() => updateCheck().catch(() => {}), (cfg.updateCheckHours || 6) * 3600_000).unref();
           }
           resolve(server.address().port);
         });

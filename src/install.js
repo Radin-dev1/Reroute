@@ -27,6 +27,13 @@ export function patchClaudeSettings(baseUrl) {
   const prev = settings.env.ANTHROPIC_BASE_URL;
   if (prev && prev !== baseUrl && !settings.env.REROUTE_PREVIOUS_BASE_URL) settings.env.REROUTE_PREVIOUS_BASE_URL = prev;
   settings.env.ANTHROPIC_BASE_URL = baseUrl;
+  // Claude Code turns tool search off for any base URL that isn't Anthropic's, which puts every MCP tool
+  // into every request (240k+ tokens with lots of MCP servers). Reroute forwards tool search as-is,
+  // and handles it for open models, so it stays on.
+  if (!('ENABLE_TOOL_SEARCH' in settings.env)) {
+    settings.env.ENABLE_TOOL_SEARCH = 'true';
+    settings.env.REROUTE_SET_TOOL_SEARCH = '1';
+  }
   fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true });
   fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2) + '\n');
   return { file: CLAUDE_SETTINGS, previous: prev || null };
@@ -108,6 +115,11 @@ export function pickerRowCount() {
   return (readJson(CLAUDE_SETTINGS).modelPicker?.options || []).filter((o) => String(o?.model || '').startsWith(PICKER_PREFIX)).length;
 }
 
+export function toolSearchOn() {
+  const v = readJson(CLAUDE_SETTINGS).env?.ENABLE_TOOL_SEARCH;
+  return v != null && !/^(false|0|off)$/i.test(String(v));
+}
+
 export function claudeBaseUrl() {
   return readJson(CLAUDE_SETTINGS).env?.ANTHROPIC_BASE_URL || null;
 }
@@ -124,6 +136,10 @@ export function unpatchClaudeSettings() {
   if (!settings.env) return false;
   const prev = settings.env.REROUTE_PREVIOUS_BASE_URL;
   delete settings.env.REROUTE_PREVIOUS_BASE_URL;
+  if (settings.env.REROUTE_SET_TOOL_SEARCH) {
+    delete settings.env.ENABLE_TOOL_SEARCH;
+    delete settings.env.REROUTE_SET_TOOL_SEARCH;
+  }
   if (prev) settings.env.ANTHROPIC_BASE_URL = prev;
   else delete settings.env.ANTHROPIC_BASE_URL;
   if (!Object.keys(settings.env).length) delete settings.env;

@@ -45,6 +45,8 @@ function toolResultText(content) {
         if (typeof c === 'string') return c;
         if (c?.type === 'text') return c.text;
         if (c?.type === 'image') return '[image]';
+        // ToolSearch results: Anthropic expands these server-side; open models just need to know the tool is ready.
+        if (c?.type === 'tool_reference') return `[Tool ${c.tool_name} is now loaded and can be called.]`;
         return JSON.stringify(c);
       })
       .join('\n');
@@ -118,7 +120,10 @@ function assistantBlocksToMessage(content) {
 
 export function anthropicToOpenAI(body, targetModel, opts = {}) {
   const messages = [];
-  const sys = systemToText(body.system);
+  // Claude Code also puts system messages inside the conversation (environment, working directory,
+  // reminders). Most OpenAI-style servers only accept a system message at the start, so they join it.
+  const inline = (body.messages || []).filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : systemToText(m.content))).filter(Boolean);
+  const sys = [systemToText(body.system), ...inline].filter(Boolean).join('\n\n');
   if (sys) messages.push({ role: 'system', content: sys });
   for (const m of body.messages || []) {
     if (m.role === 'user') messages.push(...userBlocksToMessages(m.content));
@@ -134,7 +139,9 @@ export function anthropicToOpenAI(body, targetModel, opts = {}) {
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) req.stop = body.stop_sequences;
 
   // Only client tools translate; Anthropic server tools (web_search_*, etc.) have no input_schema.
-  const tools = (body.tools || []).filter((t) => t && t.input_schema);
+  // Tools found through ToolSearch arrive with defer_loading and a full schema, so they are included;
+  // the placeholder that stands in for the rest is not a real tool.
+  const tools = (body.tools || []).filter((t) => t && t.input_schema && t.name !== 'DeferredToolPlaceholder');
   if (tools.length) {
     req.tools = tools.map((t) => ({
       type: 'function',
@@ -267,7 +274,7 @@ export function extractTextToolCalls(text, toolNames) {
 }
 
 export function toolNamesOf(body) {
-  return (body?.tools || []).filter((t) => t && t.input_schema).map((t) => t.name);
+  return (body?.tools || []).filter((t) => t && t.input_schema && t.name !== 'DeferredToolPlaceholder').map((t) => t.name);
 }
 
 export function openAIToAnthropic(resp, requestedModel, toolNames = []) {

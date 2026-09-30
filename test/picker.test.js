@@ -6,6 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 
 process.env.REROUTE_NO_NOTIFY = '1';
+process.env.REROUTE_NO_UPDATE = '1';
 process.env.REROUTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'reroute-picker-'));
 process.env.CLAUDE_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'reroute-claude-'));
 

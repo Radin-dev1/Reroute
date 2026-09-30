@@ -45,6 +45,10 @@ export const PACKS = {
   all: { label: 'Everything in the collection', dirs: '*' },
 };
 
+export function runClaude(args) {
+  return claude(args);
+}
+
 function claude(args) {
   const opts = { encoding: 'utf8', windowsHide: true };
   let r = spawnSync('claude', args, opts);

@@ -1,6 +1,6 @@
 {
   "name": "reroute-claude",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local proxy for Claude Code (terminal + desktop) that switches to the best open-source model when your Claude credits or usage limit run out.",
   "type": "module",
   "bin": {

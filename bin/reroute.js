@@ -17,12 +17,19 @@ import {
   pickerRowCount,
   claudeBaseUrl,
   autostartInstalled,
+  toolSearchOn,
   CLI_PATH,
   CLAUDE_SETTINGS,
 } from '../src/install.js';
 import { PICKER_PREFIX } from '../src/config.js';
 import * as skills from '../src/skills.js';
 import readline from 'node:readline/promises';
+import path from 'node:path';
+import os from 'node:os';
+import * as jobs from '../src/jobs.js';
+import * as tor from '../src/tor.js';
+import { applyUpdate, checkForUpdate, currentVersion } from '../src/update.js';
+import { notify } from '../src/notify.js';
 
 const HELP = `Reroute: use Claude until you run out, then switch to the best open-source model.
 
@@ -48,6 +55,15 @@ Usage: reroute <command>
   remove <id>          Remove a model you added
   pull <id>            Download a local Ollama model and give it a bigger context (e.g. reroute pull ollama-gemma4-e2b)
   notify <on|off>      Desktop notifications when Reroute switches models (default on)
+  run "<task>" ["<task>"...] [--model <id|claude>] [--allow-bash] [--no-worktree]
+                       Run tasks as parallel Claude Code agents in the background
+  jobs [<id>]          List agent jobs, or show one (jobs log <id>, jobs stop <id>, jobs clean)
+  agents <on|off|model <id>>
+                       Open-model helper agents Claude can hand work to in parallel
+  tor <on|off|status|check|open [url]>
+                       Tor tools for Claude (fetch pages and .onion sites through Tor, open Tor Browser)
+  update [--check]     Update Reroute from GitHub (it also updates itself unless autoUpdate is off)
+  version              Show the installed version
   skills [list]        Skill packs from github.com/alirezarezvani/claude-skills (~380 skills)
   skills add <pack|plugin...> [--allow-hooks]
                        Install a pack (coding, engineering, product, research, productivity,
@@ -103,11 +119,21 @@ async function startDetached() {
 const BEHAVES_AS = 'claude-sonnet-4-6';
 
 async function syncPicker(quiet = false) {
-  const s = await running();
+  let s = await running();
   if (!s) {
     if (!quiet) console.log('Reroute is not running, so the model picker was not updated.');
     return null;
   }
+  // Wait (up to 30s) for the startup check of your Ollama plan, so refused models stay out of the menu.
+  for (let i = 0; i < 60 && !s.planChecked; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    s = (await running()) || s;
+  }
+  try {
+    const { rows: n } = await api('picker/sync', {});
+    if (!quiet) console.log(n ? `Added ${n} Reroute models to the Claude Code /model menu. Restart Claude Code or the desktop app to see them.` : 'Removed Reroute models from the /model menu.');
+    return n;
+  } catch {}
   const which = loadConfig().picker || 'ready';
   const refused = which === 'ready' ? await refusedOllamaCloud(s.models) : new Set();
   const rows = [];
@@ -159,6 +185,20 @@ async function refusedOllamaCloud(models) {
 
 async function syncIfInstalled() {
   if (isInstalled()) await syncPicker();
+}
+
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+const UPDATE_COMMAND_FILE = path.join(CLAUDE_DIR, 'commands', 'reroute-update.md');
+const fwd = (p) => `"${p.replace(/\\/g, '/')}"`;
+
+// /reroute-update inside Claude Code: updates Reroute and reports the result.
+function writeUpdateCommand() {
+  fs.mkdirSync(path.dirname(UPDATE_COMMAND_FILE), { recursive: true });
+  const cmd = `${fwd(process.execPath)} ${fwd(CLI_PATH)} update`;
+  fs.writeFileSync(
+    UPDATE_COMMAND_FILE,
+    `---\ndescription: Update Reroute to the latest version from GitHub\nallowed-tools: Bash(${cmd})\n---\n\nReroute update output:\n\n!\`${cmd}\`\n\nTell me in one or two sentences what happened. (Installed by Reroute.)\n`
+  );
 }
 
 function appendLog(msg) {
@@ -250,6 +290,12 @@ async function doctor(fix) {
       if (!b) return { level: 'bad', msg: `ANTHROPIC_BASE_URL not set in ${CLAUDE_SETTINGS} (run reroute install)` };
       return b.replace(/\/$/, '') === url ? { level: 'ok', msg: `ANTHROPIC_BASE_URL = ${b}` } : { level: 'bad', msg: `ANTHROPIC_BASE_URL is ${b}, expected ${url}` };
     },
+    async () => patchClaudeSettings(url)
+  );
+
+  await check(
+    'Tool search',
+    async () => (toolSearchOn() ? { level: 'ok', msg: 'on (MCP tools load only when needed)' } : { level: 'warn', msg: 'off: Claude Code sends every MCP tool with every request, which can be 200k+ tokens' }),
     async () => patchClaudeSettings(url)
   );
 
@@ -396,6 +442,11 @@ switch (cmd) {
       });
       child.on('exit', (code, signal) => {
         if (code === 0) process.exit(0);
+        if (code === 75) {
+          appendLog('watchdog: restarting after an update');
+          delay = 1000;
+          return setTimeout(launch, 200);
+        }
         delay = Date.now() - startedAt > 60_000 ? 1000 : Math.min(delay * 2, 30_000);
         appendLog(`watchdog: proxy exited (${signal || code}); restarting in ${delay / 1000}s`);
         setTimeout(launch, delay);
@@ -432,16 +483,26 @@ switch (cmd) {
       console.log('⇄ Reroute is off · run: reroute doctor --fix');
       break;
     }
+    const seg = { usage: true, reset: true, update: true, ...(s.settings?.statusLine || {}) };
+    const extras = [];
+    if (seg.usage && s.usage && (s.usage.fiveHour != null || s.usage.sevenDay != null)) {
+      const parts = [];
+      if (s.usage.fiveHour != null) parts.push(`5h ${Math.round(s.usage.fiveHour)}%`);
+      if (s.usage.sevenDay != null) parts.push(`week ${Math.round(s.usage.sevenDay)}%`);
+      extras.push(parts.join(' · '));
+    }
+    if (seg.update && s.update?.available) extras.push('⬆ update ready: /reroute-update');
+    const tail = extras.length ? '  |  ' + extras.join('  |  ') : '';
     const picked = String(input.model?.id || '').toLowerCase();
     if (picked.startsWith(PICKER_PREFIX)) {
       const m = picked === PICKER_PREFIX + 'auto' ? s.resolvedFallback : s.models.find((x) => x.pickerId === picked);
-      console.log(`⇄ ${m?.label || picked} · open source`);
+      console.log(`⇄ ${m?.label || picked} · open source${tail}`);
     } else if (s.active === 'fallback') {
       const label = s.lastRoute?.to === 'fallback' ? s.lastRoute.label : s.resolvedFallback?.label;
-      const back = s.fallbackUntil ? ` · Claude back ${shortTime(s.fallbackUntil)}` : s.mode === 'fallback' ? ' · mode: open source' : '';
-      console.log(`⇄ ${label || 'no open model available'}${back}`);
+      const back = seg.reset && s.fallbackUntil ? ` · Claude back ${shortTime(s.fallbackUntil)}` : s.mode === 'fallback' ? ' · mode: open source' : '';
+      console.log(`⇄ ${label || 'no open model available'}${back}${tail}`);
     } else {
-      console.log(`⇄ Claude${s.mode === 'claude' ? ' · fallback off' : ''}`);
+      console.log(`⇄ Claude${s.mode === 'claude' ? ' · fallback off' : ''}${tail}`);
     }
     break;
   }
@@ -559,6 +620,226 @@ switch (cmd) {
     break;
   }
 
+  case 'version': {
+    const v = currentVersion();
+    console.log(`Reroute ${v.version}${v.commit ? ` (${v.commit})` : ''}`);
+    break;
+  }
+
+  case 'update': {
+    const checkOnly = args.includes('--check');
+    try {
+      const u = await checkForUpdate();
+      if (!u.available) {
+        console.log(`Reroute is up to date (${currentVersion().version}, ${currentVersion().commit}).`);
+        break;
+      }
+      console.log(`Update available: ${u.latest?.subject || u.latest?.version}${u.behind ? ` (${u.behind} new commit${u.behind > 1 ? 's' : ''})` : ''}`);
+      if (checkOnly) break;
+      if (await running()) {
+        const r = await api('update/install', {});
+        if (r.error) throw new Error(r.error);
+        console.log(`Updated to ${r.current?.version} (${r.current?.commit}).${(await running())?.supervised ? ' Reroute restarts itself with it now.' : ' Restart Reroute to use it.'}`);
+      } else {
+        const r = applyUpdate();
+        console.log(`Updated to ${r.to.version} (${r.to.commit}).`);
+      }
+    } catch (e) {
+      console.error(`Couldn't update: ${e.message}`);
+      process.exitCode = 1;
+    }
+    break;
+  }
+
+  case 'run': {
+    const flags = new Set(args.filter((a) => a.startsWith('--')));
+    const mi = args.indexOf('--model');
+    const modelId = mi >= 0 ? args[mi + 1] : null;
+    const tasks = args.filter((a, i) => !a.startsWith('--') && !(mi >= 0 && i === mi + 1));
+    if (!tasks.length) {
+      console.error('Usage: reroute run "<task>" ["<task>"...] [--model <id|claude>] [--allow-bash] [--no-worktree]');
+      process.exitCode = 1;
+      break;
+    }
+    const model = modelId && modelId !== 'claude' ? cfg.models.find((m) => m.id === modelId) : null;
+    if (modelId && modelId !== 'claude' && !model) {
+      console.error(`Unknown model "${modelId}". See reroute models.`);
+      process.exitCode = 1;
+      break;
+    }
+    if (!(await startDetached())) {
+      console.error('Reroute failed to start. Run reroute doctor.');
+      process.exitCode = 1;
+      break;
+    }
+    const { pickerId } = await import('../src/config.js');
+    try {
+      for (const task of tasks) {
+        const j = jobs.startJob({
+          task,
+          model: model ? pickerId(model) : null,
+          cwd: process.cwd(),
+          worktree: flags.has('--no-worktree') ? false : flags.has('--worktree') ? true : 'auto',
+          allowBash: flags.has('--allow-bash'),
+          cliPath: CLI_PATH,
+          port: cfg.port,
+          batchSize: tasks.length,
+        });
+        console.log(`Started job ${j.id} on ${model ? model.label : 'Claude'}${j.branch ? ` in ${j.workdir} (branch ${j.branch})` : ''}`);
+      }
+      console.log('\nThey run in the background. Follow them with: reroute jobs   (or in the dashboard)');
+      if (!flags.has('--allow-bash')) console.log('Jobs can read and edit files. Add --allow-bash to let them run commands too.');
+    } catch (e) {
+      console.error(e.message);
+      process.exitCode = 1;
+    }
+    break;
+  }
+
+  case '_job': {
+    jobs.runJob(args[0], {
+      onDone: (j) => {
+        if (loadConfig().notify === false) return;
+        notify(j.status === 'done' ? `Job ${j.id} finished` : `Job ${j.id} failed`, (j.status === 'done' ? j.result || 'Done.' : j.error || 'Failed.').slice(0, 180));
+      },
+    });
+    break;
+  }
+
+  case 'jobs': {
+    const [sub, id] = args;
+    if (sub === 'stop') {
+      const j = jobs.stopJob(id);
+      console.log(j ? `Stopped job ${id}.` : `No job ${id}.`);
+      break;
+    }
+    if (sub === 'log') {
+      try {
+        const lines = fs.readFileSync(jobs.logFile(id), 'utf8').trim().split('\n');
+        for (const l of lines) {
+          try {
+            const ev = JSON.parse(l);
+            if (ev.type === 'assistant') for (const b of ev.message?.content || []) {
+              if (b.type === 'text' && b.text.trim()) console.log(b.text.trim());
+              if (b.type === 'tool_use') console.log(`  → ${b.name} ${JSON.stringify(b.input).slice(0, 120)}`);
+            }
+            if (ev.type === 'result') console.log(`\n[${ev.is_error ? 'failed' : 'done'}] ${ev.result || ''}`);
+          } catch {}
+        }
+      } catch {
+        console.log(`No log for job ${id}.`);
+      }
+      break;
+    }
+    if (sub === 'clean') {
+      console.log(`Removed ${jobs.cleanJobs()} finished jobs (worktrees with uncommitted changes were kept).`);
+      break;
+    }
+    const one = sub ? jobs.readJob(sub) : null;
+    if (sub && !one) {
+      console.log(`No job ${sub}.`);
+      break;
+    }
+    const list = one ? [one] : jobs.listJobs();
+    if (!list.length) console.log('No jobs yet. Start some with: reroute run "task one" "task two"');
+    for (const j of list) {
+      const took = j.endedAt && j.startedAt ? ` ${Math.round((j.endedAt - j.startedAt) / 1000)}s` : '';
+      console.log(`${j.id}  ${j.status.padEnd(8)}${took.padEnd(7)} ${(j.model || 'Claude').replace('claude-reroute-', '').padEnd(24)} ${j.task.slice(0, 60)}`);
+      if (one) {
+        console.log(`  folder: ${j.workdir}${j.branch ? ` (branch ${j.branch})` : ''}`);
+        if (j.progress && j.status === 'running') console.log(`  now: ${j.progress}`);
+        if (j.result) console.log(`\n${j.result}`);
+        if (j.error) console.log(`\nError: ${j.error}`);
+      }
+    }
+    break;
+  }
+
+  case 'agents': {
+    const [sub, id] = args;
+    const { pickerId, PICKER_PREFIX: P } = await import('../src/config.js');
+    if (sub === 'off') {
+      console.log(`Removed ${jobs.removeHelpers(CLAUDE_DIR)} helper agents.`);
+      break;
+    }
+    if (sub === 'on' || sub === 'model') {
+      const m = id && id !== 'auto' ? cfg.models.find((x) => x.id === id) : null;
+      if (id && id !== 'auto' && !m) {
+        console.error(`Unknown model "${id}". See reroute models.`);
+        process.exitCode = 1;
+        break;
+      }
+      const model = m ? pickerId(m) : P + 'auto';
+      const names = jobs.writeHelpers(CLAUDE_DIR, model);
+      saveConfig({ helperModel: m ? m.id : 'auto' });
+      console.log(`Installed ${names.join(', ')} on ${m ? m.label : 'the best available open model'}.`);
+      console.log('Claude can now hand work to them, several at once, without using your Claude quota.');
+      console.log('Ask for it directly ("use reroute-researcher agents to look into X and Y in parallel") or let Claude decide. Restart Claude Code to load them.');
+      break;
+    }
+    const have = jobs.HELPERS.filter((h) => fs.existsSync(jobs.helperFile(CLAUDE_DIR, h.name)));
+    console.log(have.length ? `Helper agents installed: ${have.map((h) => h.name).join(', ')} (model: ${readRawConfig().helperModel || 'auto'})` : 'No helper agents installed. Add them with: reroute agents on');
+    break;
+  }
+
+  case 'tor-mcp': {
+    tor.runMcpServer(currentVersion().version);
+    break;
+  }
+
+  case 'tor': {
+    const [sub = 'status', url] = args;
+    if (sub === 'on') {
+      skills.runClaude(['mcp', 'remove', '--scope', 'user', 'reroute-tor']);
+      const r = skills.runClaude(['mcp', 'add', '--scope', 'user', 'reroute-tor', '--', process.execPath, CLI_PATH, 'tor-mcp']);
+      if (!r.ok) {
+        console.error(`Couldn't add the Tor tools to Claude Code:\n${r.out}`);
+        process.exitCode = 1;
+        break;
+      }
+      const tb = tor.torBrowserPaths();
+      console.log('Added Tor tools to Claude Code: tor_fetch (pages and .onion sites through Tor), tor_check, tor_open_browser.');
+      console.log(tb ? `Tor comes from your Tor Browser (${path.dirname(path.dirname(tb.browser))}). It doesn't need to be open.` : 'Tor Browser was not found. Install it from https://www.torproject.org so the tools can connect.');
+      console.log('Restart Claude Code, then ask e.g. "open https://check.torproject.org over Tor".');
+      break;
+    }
+    if (sub === 'off') {
+      const r = skills.runClaude(['mcp', 'remove', '--scope', 'user', 'reroute-tor']);
+      console.log(r.ok ? 'Removed the Tor tools from Claude Code.' : 'The Tor tools were not installed.');
+      break;
+    }
+    if (sub === 'open') {
+      try {
+        tor.openInTorBrowser(url);
+        console.log(`Opened ${url || 'Tor Browser'}.`);
+      } catch (e) {
+        console.error(e.message);
+        process.exitCode = 1;
+      }
+      break;
+    }
+    if (sub === 'check') {
+      try {
+        console.log('Connecting to Tor…');
+        const r = await tor.torFetch('https://check.torproject.org/api/ip');
+        const j = JSON.parse(r.body);
+        console.log(j.IsTor ? `Working: traffic goes through Tor (exit IP ${j.IP}).` : `Not going through Tor (IP ${j.IP}).`);
+      } catch (e) {
+        console.error(e.message);
+        process.exitCode = 1;
+      }
+      tor.stopOwnTor();
+      break;
+    }
+    const listed = skills.runClaude(['mcp', 'list']).out.includes('reroute-tor');
+    const tb = tor.torBrowserPaths();
+    const port = await tor.ensureTor({ start: false });
+    console.log(`Tor tools in Claude Code: ${listed ? 'on' : 'off (turn on with: reroute tor on)'}`);
+    console.log(`Tor Browser: ${tb ? tb.browser : 'not found'}`);
+    console.log(`Tor running: ${port ? `yes, port ${port}` : 'no (started automatically when a tool needs it)'}`);
+    break;
+  }
+
   case 'notify': {
     const v = args[0];
     if (!['on', 'off'].includes(v)) {
@@ -581,11 +862,13 @@ switch (cmd) {
     const auto = installAutostart();
     setEnsureHook(true);
     const line = setStatusLine(true);
+    writeUpdateCommand();
     const pickerRows = await syncPicker(true);
     console.log(`Reroute is running on ${url}`);
     console.log(`Set ANTHROPIC_BASE_URL in ${file}${previous ? ` (previous value ${previous} saved)` : ''}`);
     console.log(`Starts on login: ${auto} (with a watchdog that restarts it if it stops)`);
     console.log('Claude Code will also start Reroute itself when a session opens, if it is not running.');
+    console.log('Reroute updates itself from GitHub; you can also type /reroute-update in Claude Code.');
     if (line === 'taken') console.log('You already have a status line, so it was left alone. Add `reroute statusline` to it to see which model is answering.');
     else console.log('Status line: shows which model is answering, under the Claude Code prompt.');
     if (pickerRows) console.log(`Added ${pickerRows} open-source models to the /model menu in Claude Code (terminal and desktop).`);
@@ -602,6 +885,9 @@ switch (cmd) {
 
   case 'uninstall': {
     unpatchClaudeSettings();
+    fs.rmSync(UPDATE_COMMAND_FILE, { force: true });
+    jobs.removeHelpers(CLAUDE_DIR);
+    skills.runClaude(['mcp', 'remove', '--scope', 'user', 'reroute-tor']);
     const f = removeAutostart();
     try {
       await api('shutdown', {});
@@ -618,7 +904,7 @@ switch (cmd) {
     const child = spawn('claude', args, {
       stdio: 'inherit',
       shell: process.platform === 'win32',
-      env: { ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${cfg.port}` },
+      env: { ENABLE_TOOL_SEARCH: 'true', ...process.env, ANTHROPIC_BASE_URL: `http://127.0.0.1:${cfg.port}` },
     });
     child.on('exit', (code) => process.exit(code ?? 0));
     break;
