@@ -8,6 +8,10 @@ Reroute is a tiny local proxy for **Claude Code**: the terminal CLI and the Code
 - Your Claude login is only ever sent to Anthropic, never to a fallback provider.
 - You pick the model. The rest act as **backups** if your pick fails.
 - Handles tool calls, streaming, images and system prompts, so Claude Code keeps editing files and running commands on the fallback model.
+- **Repairs what open models get wrong**: broken tool-call JSON, misspelled tool names, tool calls written as text.
+- **Fits the conversation to the model**: skips models whose context window is too small, and trims the oldest turns if nothing fits.
+- **Stays up**: a watchdog restarts it, and Claude Code itself starts it when a session opens.
+- **Tells you when it switches**: desktop notifications, plus a status line under the Claude Code prompt.
 - The open-source models show up in Claude Code's **model menu** (`/model` in the terminal, the model picker in the desktop app), so you can switch to one any time.
 - Dashboard at `http://127.0.0.1:4747/` to switch models and modes.
 
@@ -30,7 +34,9 @@ reroute install
 1. starts Reroute in the background,
 2. sets `ANTHROPIC_BASE_URL=http://127.0.0.1:4747` in `~/.claude/settings.json` (it backs up the file first). The Claude Code CLI and the desktop app's Code tab both read this file,
 3. adds the open-source models you can use to Claude Code's model menu,
-4. makes Reroute start when you log in (Windows Startup folder, macOS LaunchAgent, or Linux autostart).
+4. makes Reroute start when you log in, under a watchdog (Windows Startup folder, macOS LaunchAgent, or Linux autostart),
+5. adds a Claude Code `SessionStart` hook that starts Reroute if it isn't running,
+6. sets a status line that shows which model is answering (only if you don't already have one).
 
 Restart Claude Code and the desktop app afterwards. To undo everything, run `reroute uninstall`.
 
@@ -98,6 +104,39 @@ Notes on some of these:
 - **Gemma 4 E2B** is tiny and runs almost anywhere, but it struggles with big multi-step coding tasks.
 - **Realtime-Venus** (a full-duplex audio/video model) and **JanusFlow** (an image understanding/generation model) have no hosted API or GGUF. Serve them yourself on an OpenAI-compatible server at `http://localhost:8000/v1` (vLLM, SGLang, `transformers serve`...). JanusFlow can't call tools, so it can chat but can't edit files. `auto` never picks either of these.
 
+## Staying up
+
+If Claude Code points at Reroute and Reroute isn't running, Claude Code can't connect. Three things prevent that:
+
+- **Watchdog.** Reroute runs as `reroute daemon`, which restarts the proxy within seconds if it crashes or is killed.
+- **Session-start hook.** Every time Claude Code opens a session (terminal or desktop), it runs `reroute ensure` first, which starts Reroute if needed. This takes well under a second.
+- **Start on login**, so it's there after a reboot.
+
+If something still looks off, run:
+
+```bash
+reroute doctor         # checks everything
+reroute doctor --fix   # and fixes what it can
+```
+
+It checks Node, the proxy and watchdog, your Claude Code settings, the hook, start-on-login, whether Anthropic is reachable, which fallback models work, the context size of local models, the model menu and the status line.
+
+## Knowing what's answering
+
+- **Notifications.** A desktop notification when Reroute switches to an open-source model (and until when), when Claude is back, and if no model at all could answer. Turn them off with `reroute notify off`.
+- **Status line.** Under the Claude Code prompt: `⇄ Claude`, `⇄ Nemotron 3 Ultra via Ollama Cloud · Claude back 4:30 PM`, or `⇄ Kimi K3 · open source` when you picked one yourself. If you already have your own status line, Reroute leaves it alone; add `reroute statusline` to yours to include it.
+
+## Making open models work well in Claude Code
+
+Claude Code is built around Claude, so Reroute smooths over the ways other models differ:
+
+- **Broken tool calls get repaired.** Tool arguments are collected, then fixed before Claude Code sees them: trailing commas, code fences, cut-off JSON, Python-style dicts, double-encoded strings. Tool names are matched to the real tools (`read` → `Read`, `functions.Bash` → `Bash`).
+- **Tool calls written as text become real ones.** Some models write `<tool_call>{...}</tool_call>` or `<function=Bash>...` into their reply instead of calling the tool. Reroute turns those into real tool calls and keeps the markup out of what you see.
+- **Context windows are respected.** Reroute knows each model's context size. Long conversations skip models too small to hold them, and the answer length is capped to what fits. If a conversation is too long for every model you have, Reroute leaves out the oldest turns, keeping your first request and the recent work and never splitting a tool call from its result, and adds a note saying so.
+- **Local models get a real context.** Ollama gives local models only 4k–32k tokens by default, which is less than Claude Code's system prompt. `reroute pull` makes a copy with a 32k context (change it with `"localContext"`), and `reroute doctor --fix` does it for models you already have.
+- **Failed streams move on.** If a model fails before sending anything (an error event, an empty reply), Reroute tries the next one. Nothing has reached Claude Code yet, so you never see the failure.
+- **Your Ollama plan is checked at startup.** Ollama Cloud models your plan doesn't include are skipped from the start, with a free 1-token check.
+
 ## When does it switch?
 
 | Claude replies with | Reroute does |
@@ -120,9 +159,9 @@ reroute mode fallback   # always use the open-source model
 ## All commands
 
 ```
-reroute install | uninstall | claude [args] | start | stop | status | open | logs
+reroute install | uninstall | claude [args] | start | daemon | stop | status | doctor [--fix] | open | logs
 reroute models | use <id|auto> | backups <on|off> | add | remove | pull <id> | picker <ready|all|off> | sync
-reroute mode <auto|claude|fallback> | key <provider> <key> | reset
+reroute mode <auto|claude|fallback> | key <provider> <key> | reset | notify <on|off> | statusline
 ```
 
 ## Config
@@ -137,6 +176,8 @@ reroute mode <auto|claude|fallback> | key <provider> <key> | reset
   "backups": true,
   "cooldownMinutes": 30,
   "fallbackOnOverload": true,
+  "localContext": 32768,
+  "notify": true,
   "apiKeys": { "openrouter": "sk-or-..." },
   "providers": {
     "mybox": { "label": "My GPU box", "type": "openai", "baseUrl": "http://192.168.1.50:8000/v1", "keyless": true }
@@ -155,7 +196,7 @@ Provider `type` is `openai` (any `/chat/completions` API; Reroute translates to 
 npm test
 ```
 
-The tests start fake Claude and fake open-source servers and check the switch-over, the cooldowns, backups, the model menu, and translating streaming tool calls.
+The tests start fake Claude and fake open-source servers and check the switch-over, the cooldowns, backups, the model menu, translating streaming tool calls, tool-call repair, context fitting and stream retries.
 
 ## License
 

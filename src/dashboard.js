@@ -96,7 +96,7 @@ function render() {
   const auto = { id: 'auto', label: 'Auto: best available', note: st.resolvedFallback && st.fallbackModel === 'auto' ? 'Currently ' + st.resolvedFallback.label : 'Picks the top model you have access to', usable: true, providerLabel: '' };
   $('#models').innerHTML = [auto, ...st.models].map((m) => {
     const sel = st.fallbackModel === m.id;
-    const tag = m.id === 'auto' ? '' : m.skippedUntil ? '<span class="tag">refused, skipping for now</span>' : m.usable ? '<span class="tag ok">' + esc(m.providerLabel) + '</span>' : '<span class="tag">needs <code>' + esc(m.needs) + '</code></span>';
+    const tag = m.id === 'auto' ? '' : m.notInPlan ? '<span class="tag">not in your Ollama plan</span>' : m.skippedUntil ? '<span class="tag">refused, skipping for now</span>' : m.usable ? '<span class="tag ok">' + esc(m.providerLabel) + '</span>' : '<span class="tag">needs <code>' + esc(m.needs) + '</code></span>';
     return '<label class="model ' + (sel ? 'sel ' : '') + (m.usable ? '' : 'off') + '"><input type="radio" name="m" value="' + esc(m.id) + '"' + (sel ? ' checked' : '') + '>' +
       '<div><div class="name">' + esc(m.label) + '</div><div class="muted">' + esc(m.note || m.model || '') + (m.hf ? ' · <a href="https://huggingface.co/' + esc(m.hf) + '" target="_blank" rel="noopener" style="color:var(--accent)">model card</a>' : '') + '</div></div>' + tag + '</label>';
   }).join('');

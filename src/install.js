@@ -49,8 +49,77 @@ export function isInstalled() {
   return /^http:\/\/(127\.0\.0\.1|localhost):\d+\/?$/.test(settings.env?.ANTHROPIC_BASE_URL || '');
 }
 
+// Commands Reroute puts in Claude Code's settings. Recognized by the " ensure" / " statusline" suffix on our script.
+// Always quoted, forward slashes: works whether Claude Code runs it through cmd, PowerShell or Git Bash.
+const q = (p) => `"${p.replace(/\\/g, '/')}"`;
+export const ENSURE_COMMAND = `${q(process.execPath)} ${q(CLI_PATH)} ensure`;
+export const STATUSLINE_COMMAND = `${q(process.execPath)} ${q(CLI_PATH)} statusline`;
+const isOurs = (cmd, verb) => typeof cmd === 'string' && cmd.includes('reroute.js') && cmd.trim().endsWith(verb);
+
+function writeSettings(settings) {
+  fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true });
+  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2) + '\n');
+}
+
+// A SessionStart hook: every time Claude Code (terminal or desktop) opens a session, it makes sure
+// Reroute is running before the first request goes out.
+export function setEnsureHook(on = true) {
+  const settings = readJson(CLAUDE_SETTINGS);
+  const groups = (settings.hooks?.SessionStart || [])
+    .map((g) => ({ ...g, hooks: (g.hooks || []).filter((h) => !isOurs(h.command, 'ensure')) }))
+    .filter((g) => g.hooks.length);
+  if (on) groups.push({ hooks: [{ type: 'command', command: ENSURE_COMMAND, timeout: 15 }] });
+  settings.hooks = { ...(settings.hooks || {}), SessionStart: groups };
+  if (!groups.length) delete settings.hooks.SessionStart;
+  if (!Object.keys(settings.hooks).length) delete settings.hooks;
+  writeSettings(settings);
+}
+
+export function hasEnsureHook() {
+  const settings = readJson(CLAUDE_SETTINGS);
+  return (settings.hooks?.SessionStart || []).some((g) => (g.hooks || []).some((h) => isOurs(h.command, 'ensure')));
+}
+
+// The status line under Claude Code's prompt. Only set when you don't already have one.
+// Returns 'set' | 'ours' | 'taken'.
+export function setStatusLine(on = true) {
+  const settings = readJson(CLAUDE_SETTINGS);
+  const current = settings.statusLine?.command;
+  const ours = isOurs(current, 'statusline');
+  if (!on) {
+    if (ours) {
+      delete settings.statusLine;
+      writeSettings(settings);
+    }
+    return ours ? 'removed' : 'kept';
+  }
+  if (current && !ours) return 'taken';
+  settings.statusLine = { type: 'command', command: STATUSLINE_COMMAND, padding: 0 };
+  writeSettings(settings);
+  return ours ? 'ours' : 'set';
+}
+
+export function statusLineState() {
+  const current = readJson(CLAUDE_SETTINGS).statusLine?.command;
+  return !current ? 'none' : isOurs(current, 'statusline') ? 'ours' : 'taken';
+}
+
+export function pickerRowCount() {
+  return (readJson(CLAUDE_SETTINGS).modelPicker?.options || []).filter((o) => String(o?.model || '').startsWith(PICKER_PREFIX)).length;
+}
+
+export function claudeBaseUrl() {
+  return readJson(CLAUDE_SETTINGS).env?.ANTHROPIC_BASE_URL || null;
+}
+
+export function autostartInstalled() {
+  return fs.existsSync(autostartPaths().file);
+}
+
 export function unpatchClaudeSettings() {
   setPickerRows([]);
+  setEnsureHook(false);
+  setStatusLine(false);
   const settings = readJson(CLAUDE_SETTINGS);
   if (!settings.env) return false;
   const prev = settings.env.REROUTE_PREVIOUS_BASE_URL;
@@ -62,7 +131,7 @@ export function unpatchClaudeSettings() {
   return true;
 }
 
-function autostartPaths() {
+export function autostartPaths() {
   const home = os.homedir();
   if (process.platform === 'win32') {
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
@@ -79,7 +148,7 @@ export function installAutostart() {
   if (process.platform === 'win32') {
     // A .vbs in the Startup folder runs node with no console window.
     const q = (s) => s.replace(/"/g, '""');
-    fs.writeFileSync(file, `CreateObject("WScript.Shell").Run """${q(node)}"" ""${q(CLI_PATH)}"" start", 0, False\r\n`);
+    fs.writeFileSync(file, `CreateObject("WScript.Shell").Run """${q(node)}"" ""${q(CLI_PATH)}"" daemon", 0, False\r\n`);
   } else if (process.platform === 'darwin') {
     fs.writeFileSync(
       file,
@@ -87,7 +156,7 @@ export function installAutostart() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>dev.reroute.proxy</string>
-  <key>ProgramArguments</key><array><string>${node}</string><string>${CLI_PATH}</string><string>start</string></array>
+  <key>ProgramArguments</key><array><string>${node}</string><string>${CLI_PATH}</string><string>daemon</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict></plist>
@@ -99,7 +168,7 @@ export function installAutostart() {
   } else {
     fs.writeFileSync(
       file,
-      `[Desktop Entry]\nType=Application\nName=Reroute\nExec="${node}" "${CLI_PATH}" start\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n`
+      `[Desktop Entry]\nType=Application\nName=Reroute\nExec="${node}" "${CLI_PATH}" daemon\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n`
     );
   }
   return file;

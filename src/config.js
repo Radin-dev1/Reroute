@@ -19,8 +19,8 @@ export const DEFAULT_PROVIDERS = {
   },
   ollama: {
     label: 'Ollama (local, or :cloud models)',
-    type: 'anthropic',
-    baseUrl: 'http://localhost:11434',
+    type: 'openai',
+    baseUrl: 'http://localhost:11434/v1',
     apiKeyEnv: 'OLLAMA_API_KEY',
     keyless: true,
   },
@@ -168,6 +168,84 @@ export const DEFAULT_MODELS = [
   { id: 'local-janusflow-1.3b', label: 'JanusFlow 1.3B (self-hosted)', provider: 'selfhosted', model: 'deepseek-ai/JanusFlow-1.3B', hf: 'deepseek-ai/JanusFlow-1.3B', note: 'Image understanding/generation model; chat only, no tool calls', autoPick: false },
 ];
 
+// Context windows in tokens, checked against OpenRouter, Hugging Face and Ollama (September 2026).
+// Local Ollama models get `localContext` instead (see DEFAULTS). Unknown models count as DEFAULT_CONTEXT.
+export const DEFAULT_CONTEXT = 131072;
+export const MODEL_CONTEXT = {
+  'glm-5.3': 1048576,
+  'kimi-k3': 1048576,
+  'deepseek-v4-pro': 1048576,
+  'qwen3.8-max': 1000000,
+  'qwen3.8-2.4t': 1048576,
+  'mimo-v2.6-pro': 1050000,
+  'nemotron-3-ultra': 262144,
+  'longcat-2.0': 1048756,
+  'kimi-k2.7-code': 262144,
+  'kat-coder-pro-v2.5': 262144,
+  'qwen3-coder-next': 262144,
+  'minimax-m3': 1048576,
+  'glm-5.2': 1048576,
+  'kimi-k2.6': 262144,
+  hy3: 262144,
+  'qwen3.5-397b': 262144,
+  'trinity-large': 262144,
+  'minimax-m2.7': 204800,
+  'glm-5.3-flash': 1048576,
+  'deepseek-v4.1-flash': 1048576,
+  'mimo-v2.6-flash': 1048576,
+  'qwen3.8-flash': 1000000,
+  'ling-3.0-flash': 262144,
+  'step-3.7-flash': 262144,
+  'qwen3.6-35b': 262144,
+  'qwen3.8-omni-flash': 1000000,
+  'gpt-oss-120b': 131072,
+  'gemma-4-31b': 262144,
+  'gemma-4-26b': 262144,
+  'mistral-small-2603': 262144,
+  'granite-4.2-8b': 131072,
+  'nemotron-3-ultra-free': 1000000,
+  'qwen3.8-27b-free': 262144,
+  'nemotron-3-super-free': 262144,
+  'north-mini-code-free': 256000,
+  'gemma-4-31b-free': 262144,
+  'gemma-4-26b-free': 262144,
+  'nemotron-3.5-lightning-free': 1000000,
+  'nemotron-3-nano-omni-free': 256000,
+  'hf-glm-5.3': 1048576,
+  'hf-kimi-k3': 1048576,
+  'hf-deepseek-v4-pro': 1048576,
+  'hf-qwen3.8-2.4t': 1010000,
+  'hf-glm-5.2': 1048576,
+  'hf-qwen3-coder-480b': 262144,
+  'hf-qwen3-coder-next': 262144,
+  'hf-glm-5.3-flash': 1048576,
+  'hf-deepseek-v4.1-flash': 1048576,
+  'hf-qwen3.8-27b': 1000000,
+  'hf-gemma-4-31b': 262144,
+  'hf-gemma-4-26b': 262144,
+  'hf-gpt-oss-120b': 131072,
+  'groq-gpt-oss-120b': 131072,
+  'groq-gpt-oss-20b': 131072,
+  'ollama-glm-5.3-cloud': 1048576,
+  'ollama-kimi-k3-cloud': 1048576,
+  'ollama-deepseek-v4-pro-cloud': 1048576,
+  'ollama-kimi-k2.7-code-cloud': 262144,
+  'ollama-minimax-m3-cloud': 512000,
+  'ollama-mistral-large-3-cloud': 262144,
+  'ollama-glm-5.2-cloud': 1048576,
+  'ollama-kimi-k2.6-cloud': 262144,
+  'ollama-minimax-m2.7-cloud': 196608,
+  'ollama-glm-5.3-flash-cloud': 1048576,
+  'ollama-deepseek-v4.1-flash-cloud': 1048576,
+  'ollama-nemotron-3-ultra-cloud': 262144,
+  'ollama-gpt-oss-120b-cloud': 131072,
+  'ollama-nemotron-3-super-cloud': 262144,
+  'ollama-gemma4-31b-cloud': 262144,
+  'ollama-nemotron-3-nano-cloud': 262144,
+  'local-realtime-venus': 32768,
+  'local-janusflow-1.3b': 4096,
+};
+
 export const DEFAULTS = {
   port: 4747,
   host: '127.0.0.1',
@@ -178,6 +256,11 @@ export const DEFAULTS = {
   fallbackModel: 'auto',
   // When your picked model fails (refused, out of quota, offline), try the other models as backups.
   backups: true,
+  // Context size Reroute gives local Ollama models (`reroute pull` creates a copy of the model with it).
+  // Ollama's own default is only 4k-32k depending on your GPU, which is too small for Claude Code.
+  localContext: 32768,
+  // Desktop notifications when Reroute switches between Claude and open-source models.
+  notify: true,
   // How long to stay on the fallback when Claude doesn't say when the limit resets.
   cooldownMinutes: 30,
   // Also fall back when Anthropic is overloaded (HTTP 529), for a short time.
@@ -206,7 +289,10 @@ export function loadConfig() {
   }
   const custom = Array.isArray(raw.customModels) ? raw.customModels : [];
   const customIds = new Set(custom.map((m) => m.id));
-  cfg.models = [...custom, ...DEFAULT_MODELS.filter((m) => !customIds.has(m.id))];
+  cfg.models = [...custom, ...DEFAULT_MODELS.filter((m) => !customIds.has(m.id))].map((m) => ({
+    ...m,
+    context: m.context || MODEL_CONTEXT[m.id] || (m.local ? cfg.localContext : DEFAULT_CONTEXT),
+  }));
   cfg.apiKeys = raw.apiKeys || {};
   return cfg;
 }
@@ -252,6 +338,16 @@ export function modelFromPickerId(cfg, requested) {
   if (!id.startsWith(PICKER_PREFIX)) return null;
   if (id === PICKER_PREFIX + 'auto') return 'auto';
   return cfg.models.find((m) => pickerId(m) === id) || null;
+}
+
+// Ollama's native API root (the provider baseUrl points at its /v1 OpenAI endpoint).
+export function ollamaRoot(cfg) {
+  return (cfg.providers.ollama?.baseUrl || 'http://localhost:11434/v1').replace(/\/v1\/?$/, '').replace(/\/$/, '');
+}
+
+// Name of the larger-context copy `reroute pull` creates for a local Ollama model.
+export function ollamaContextName(model) {
+  return 'reroute/' + String(model).toLowerCase().replace(/^hf\.co\//, '').replace(/[^a-z0-9.-]+/g, '-');
 }
 
 export function isCloudModel(name) {

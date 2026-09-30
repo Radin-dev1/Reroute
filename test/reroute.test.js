@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 
+process.env.REROUTE_NO_NOTIFY = '1';
 process.env.REROUTE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'reroute-test-'));
 
 const { createReroute } = await import('../src/server.js');
@@ -188,7 +189,8 @@ test('streaming with tool calls is translated to Anthropic SSE', async () => {
   assert.deepEqual(names, [
     'message_start',
     'content_block_start', 'content_block_delta', 'content_block_delta', 'content_block_stop',
-    'content_block_start', 'content_block_delta', 'content_block_delta', 'content_block_stop',
+    // Tool arguments are collected, repaired, then sent in one piece.
+    'content_block_start', 'content_block_delta', 'content_block_stop',
     'message_delta', 'message_stop',
   ]);
   const toolStart = events[5].data;
@@ -197,8 +199,8 @@ test('streaming with tool calls is translated to Anthropic SSE', async () => {
   assert.equal(toolStart.content_block.name, 'Read');
   const json = events.filter((e) => e.data.delta?.type === 'input_json_delta').map((e) => e.data.delta.partial_json).join('');
   assert.deepEqual(JSON.parse(json), { file_path: 'a.txt' });
-  assert.equal(events[9].data.delta.stop_reason, 'tool_use');
-  assert.equal(events[9].data.usage.output_tokens, 5);
+  assert.equal(events[8].data.delta.stop_reason, 'tool_use');
+  assert.equal(events[8].data.usage.output_tokens, 5);
 });
 
 test('anthropic-type providers get the request passed through with the model swapped', async () => {
