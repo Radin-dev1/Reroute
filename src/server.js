@@ -8,6 +8,8 @@ import {
   providerUsable,
   fallbackCandidates,
   modelUsable,
+  modelFromPickerId,
+  pickerId,
   isCloudModel,
   HOME_DIR,
   LOG_PATH,
@@ -247,10 +249,12 @@ export function createReroute(options = {}) {
     return sendJson(res, 200, openAIToAnthropic(json, requestedModel), { 'x-reroute-model': model.id });
   }
 
-  async function routeToFallback(res, body, signal, why) {
+  // first: a model chosen in Claude Code's /model picker; it goes ahead of everything else.
+  async function routeToFallback(res, body, signal, why, first = null) {
     const bad = state.badModels;
     // Anything that refused recently (including your pick) goes to the back of the line.
-    const list = (await candidates()).sort((x, y) => (bad.has(x.id) ? 1 : 0) - (bad.has(y.id) ? 1 : 0));
+    let list = (await candidates()).sort((x, y) => (bad.has(x.id) ? 1 : 0) - (bad.has(y.id) ? 1 : 0));
+    if (first) list = cfg.backups === false ? [first] : [first, ...list.filter((m) => m.id !== first.id)];
     if (!list.length) {
       return anthropicError(
         res,
@@ -285,6 +289,10 @@ export function createReroute(options = {}) {
     } catch {
       return anthropicError(res, 400, 'Reroute: invalid JSON body', 'invalid_request_error');
     }
+
+    // Picked a Reroute model in Claude Code's /model menu: skip Claude entirely.
+    const direct = modelFromPickerId(cfg, body.model);
+    if (direct) return routeToFallback(res, body, signal, 'chosen in Claude Code', direct === 'auto' ? null : direct);
 
     if (inFallback()) return routeToFallback(res, body, signal, state.fallbackReason || `mode=${cfg.mode}`);
 
@@ -362,6 +370,7 @@ export function createReroute(options = {}) {
         return {
           ...m,
           providerLabel: cfg.providers[m.provider]?.label || m.provider,
+          pickerId: pickerId(m),
           usable,
           needs,
           skippedUntil: skippedUntil && skippedUntil > Date.now() ? skippedUntil : null,
@@ -432,12 +441,12 @@ export function createReroute(options = {}) {
 
       if (req.method === 'POST' && url.pathname === '/v1/messages') return await handleMessages(req, res, bodyBuf, ac.signal);
 
-      if (req.method === 'POST' && url.pathname === '/v1/messages/count_tokens' && inFallback()) {
+      if (req.method === 'POST' && url.pathname === '/v1/messages/count_tokens') {
         let body = {};
         try {
           body = JSON.parse(bodyBuf.toString('utf8'));
         } catch {}
-        return sendJson(res, 200, { input_tokens: estimateTokens(body) });
+        if (inFallback() || modelFromPickerId(cfg, body.model)) return sendJson(res, 200, { input_tokens: estimateTokens(body) });
       }
 
       // Everything else (models list, count_tokens, OAuth endpoints...) goes straight to Anthropic.

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { PICKER_PREFIX } from './config.js';
 
 const CLI_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'reroute.js');
 export const CLAUDE_SETTINGS = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'settings.json');
@@ -31,7 +32,25 @@ export function patchClaudeSettings(baseUrl) {
   return { file: CLAUDE_SETTINGS, previous: prev || null };
 }
 
+// Rows in Claude Code's /model picker (terminal and desktop). Rows you added yourself are kept.
+export function setPickerRows(rows) {
+  const settings = readJson(CLAUDE_SETTINGS);
+  const own = (settings.modelPicker?.options || []).filter((o) => !String(o?.model || '').startsWith(PICKER_PREFIX));
+  const options = [...own, ...rows];
+  if (options.length) settings.modelPicker = { ...(settings.modelPicker || {}), options };
+  else delete settings.modelPicker;
+  fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true });
+  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2) + '\n');
+  return rows.length;
+}
+
+export function isInstalled() {
+  const settings = readJson(CLAUDE_SETTINGS);
+  return /^http:\/\/(127\.0\.0\.1|localhost):\d+\/?$/.test(settings.env?.ANTHROPIC_BASE_URL || '');
+}
+
 export function unpatchClaudeSettings() {
+  setPickerRows([]);
   const settings = readJson(CLAUDE_SETTINGS);
   if (!settings.env) return false;
   const prev = settings.env.REROUTE_PREVIOUS_BASE_URL;

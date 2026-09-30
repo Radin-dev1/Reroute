@@ -3,7 +3,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { loadConfig, saveConfig, readRawConfig, providerKey, CONFIG_PATH, LOG_PATH } from '../src/config.js';
 import { createReroute } from '../src/server.js';
-import { patchClaudeSettings, unpatchClaudeSettings, installAutostart, removeAutostart, CLI_PATH, CLAUDE_SETTINGS } from '../src/install.js';
+import { patchClaudeSettings, unpatchClaudeSettings, setPickerRows, isInstalled, installAutostart, removeAutostart, CLI_PATH, CLAUDE_SETTINGS } from '../src/install.js';
+import { PICKER_PREFIX } from '../src/config.js';
 
 const HELP = `Reroute: use Claude until you run out, then switch to the best open-source model.
 
@@ -19,6 +20,9 @@ Usage: reroute <command>
   models               List fallback models and which ones you can use
   use <model|auto>     Choose the fallback model ("auto" = best available)
   backups <on|off>     If your chosen model fails, try the others (default on)
+  picker <ready|all|off>
+                       Which Reroute models appear in Claude Code's /model menu (default: ready)
+  sync                 Refresh the /model menu (after adding keys or pulling models)
   add <id> <provider> <model-name> [label]
                        Add any model, e.g. reroute add my-qwen openrouter qwen/qwen3.8-flash
   remove <id>          Remove a model you added
@@ -63,6 +67,71 @@ async function startDetached() {
     if (await running()) return true;
   }
   return false;
+}
+
+// Puts Reroute's models in Claude Code's /model picker (terminal + desktop app).
+// picker: "ready" (default) = only models you can use right now, "all" = every model, "off" = none.
+// Claude Code handles these rows like this known model (prompt style, effort defaults) instead of warning
+// about an unrecognized model. The model ID it sends is still the Reroute one.
+const BEHAVES_AS = 'claude-sonnet-4-6';
+
+async function syncPicker(quiet = false) {
+  const s = await running();
+  if (!s) {
+    if (!quiet) console.log('Reroute is not running, so the model picker was not updated.');
+    return null;
+  }
+  const which = loadConfig().picker || 'ready';
+  const refused = which === 'ready' ? await refusedOllamaCloud(s.models) : new Set();
+  const rows = [];
+  if (which !== 'off') {
+    rows.push({ model: PICKER_PREFIX + 'auto', label: 'Open source: best available', description: 'Reroute picks the best open model you can use', behavesAs: BEHAVES_AS });
+    for (const m of s.models) {
+      if (which !== 'all' && (!m.usable || refused.has(m.id))) continue;
+      if (which === 'all' && m.autoPick === false && !m.usable) continue;
+      rows.push({ model: m.pickerId, label: m.label, description: ['Via Reroute', m.providerLabel, m.note].filter(Boolean).join(' · '), behavesAs: BEHAVES_AS });
+    }
+  }
+  const n = setPickerRows(rows);
+  if (!quiet) {
+    console.log(
+      n
+        ? `Added ${n} Reroute models to the Claude Code /model menu. Restart Claude Code or the desktop app to see them.`
+        : 'Removed Reroute models from the /model menu.'
+    );
+  }
+  return n;
+}
+
+// Ollama Cloud models your plan doesn't include answer 402 right away, and a refusal costs nothing.
+// A 1-token test call tells which ones to leave out of the menu.
+async function refusedOllamaCloud(models) {
+  const c = loadConfig();
+  const base = (c.providers.ollama?.baseUrl || 'http://localhost:11434').replace(/\/$/, '');
+  const cloud = models.filter((m) => m.provider === 'ollama' && m.usable && /(:|-)cloud$/.test(m.model));
+  const refused = new Set();
+  // Two at a time: Ollama answers bursts of parallel calls with errors that don't say whether the model is included.
+  const queue = [...cloud];
+  const worker = async () => {
+    for (let m = queue.shift(); m; m = queue.shift()) {
+      try {
+        const r = await fetch(`${base}/v1/messages`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ model: m.model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        if ([401, 402, 403, 404].includes(r.status)) refused.add(m.id);
+        await r.body?.cancel();
+      } catch {}
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  return refused;
+}
+
+async function syncIfInstalled() {
+  if (isInstalled()) await syncPicker();
 }
 
 function fmtUntil(ms) {
@@ -116,9 +185,11 @@ switch (cmd) {
     }
     const { file, previous } = patchClaudeSettings(url);
     const auto = installAutostart();
+    const pickerRows = await syncPicker(true);
     console.log(`Reroute is running on ${url}`);
     console.log(`Set ANTHROPIC_BASE_URL in ${file}${previous ? ` (previous value ${previous} saved)` : ''}`);
     console.log(`Starts on login: ${auto}`);
+    if (pickerRows) console.log(`Added ${pickerRows} open-source models to the /model menu in Claude Code (terminal and desktop).`);
     console.log('\nRestart Claude Code (terminal) and the Claude desktop app so they pick up the change.');
     const s = await running();
     if (s && !s.resolvedFallback) {
@@ -208,6 +279,21 @@ switch (cmd) {
     break;
   }
 
+  case 'sync':
+    await syncPicker();
+    break;
+
+  case 'picker': {
+    const v = args[0];
+    if (!['ready', 'all', 'off'].includes(v)) {
+      console.error('Usage: reroute picker <ready|all|off>   (which Reroute models show in the Claude Code /model menu)');
+      process.exit(1);
+    }
+    saveConfig({ picker: v });
+    await syncPicker();
+    break;
+  }
+
   case 'backups': {
     const v = args[0];
     if (!['on', 'off'].includes(v)) {
@@ -235,6 +321,7 @@ switch (cmd) {
     custom.push({ id, label: labelParts.join(' ') || `${model} (${provider})`, provider, model });
     saveConfig({ customModels: custom });
     console.log(`Added ${id}. Choose it with: reroute use ${id}`);
+    await syncIfInstalled();
     break;
   }
 
@@ -248,6 +335,7 @@ switch (cmd) {
     }
     saveConfig({ customModels: custom, ...(raw.fallbackModel === args[0] ? { fallbackModel: 'auto' } : {}) });
     console.log(`Removed ${args[0]}`);
+    await syncIfInstalled();
     break;
   }
 
@@ -259,8 +347,9 @@ switch (cmd) {
     }
     const child = spawn('ollama', ['pull', m.model], { stdio: 'inherit', shell: process.platform === 'win32' });
     child.on('exit', (code) => {
-      if (code === 0) console.log(`\nReady. Choose it with: reroute use ${m.id}`);
-      process.exit(code ?? 0);
+      if (code !== 0) process.exit(code ?? 1);
+      console.log(`\nReady. Choose it with: reroute use ${m.id}`);
+      syncIfInstalled().then(() => process.exit(0));
     });
     break;
   }
@@ -285,6 +374,7 @@ switch (cmd) {
     const raw = JSON.parse(fs.existsSync(CONFIG_PATH) ? fs.readFileSync(CONFIG_PATH, 'utf8') : '{}');
     saveConfig({ apiKeys: { ...(raw.apiKeys || {}), [provider]: key } });
     console.log(`Saved ${provider} key to ${CONFIG_PATH}`);
+    await syncIfInstalled();
     break;
   }
 
