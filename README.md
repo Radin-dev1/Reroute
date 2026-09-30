@@ -86,17 +86,19 @@ Under the hood these are rows in the `modelPicker` setting in `~/.claude/setting
 
 ## Built-in models (September 2026)
 
-85 models, listed in the order Reroute tries them.
+108 models, listed in the order Reroute tries them. With local-only mode on (the default), only the "On this PC" ones are used.
 
-**OpenRouter** (39): GLM-5.3 (Z.ai) · Kimi K3 (Moonshot) · DeepSeek V4 Pro · Qwen3.8 Max · Qwen3.8 2.4T-A95B · Xiaomi MiMo V2.6 Pro · Nemotron 3 Ultra 550B · LongCat 2.0 (Meituan) · Kimi K2.7 Code · KAT-Coder Pro V2.5 (Kwaipilot) · Qwen3-Coder Next · MiniMax M3 · GLM-5.2 · Kimi K2.6 · Hunyuan 3 (Tencent) · Qwen3.5 397B-A17B · Arcee Trinity Large Thinking · MiniMax M2.7 · GLM-5.3 Flash · DeepSeek V4.1 Flash · Xiaomi MiMo V2.6 Flash · Qwen3.8 Flash · Ling 3.0 Flash (inclusionAI) · Step 3.7 Flash (StepFun) · Qwen3.6 35B-A3B · Qwen3.8 Omni Flash · gpt-oss 120B · Gemma 4 31B · Gemma 4 26B-A4B · Mistral Small (2603) · IBM Granite 4.2 8B · *free:* Nemotron 3 Ultra 550B, Qwen3.8 27B, Nemotron 3 Super 120B, Cohere North Mini Code, Gemma 4 31B, Gemma 4 26B-A4B, Nemotron 3.5 Lightning, Nemotron 3 Nano Omni
+**On this PC (WebGPU, built in)** (11): [Qwen3 4B Instruct](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) (2.9 GB) · [Phi-4 mini Instruct](https://huggingface.co/microsoft/Phi-4-mini-instruct) (2.55 GB) · [Granite 4.0 micro](https://huggingface.co/ibm-granite/granite-4.0-micro) (2.3 GB) · [Gemma 4 E4B](https://huggingface.co/google/gemma-4-E4B-it) (5.2 GB) · [Llama 3.2 3B Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) (2.4 GB) · [Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it) (3.4 GB) · [Qwen3 1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) (1.4 GB) · [Granite 4.0 1B](https://huggingface.co/ibm-granite/granite-4.0-1b) (1.25 GB) · [LFM2 1.2B](https://huggingface.co/LiquidAI/LFM2-1.2B) (0.76 GB) · [Llama 3.2 1B Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) (1.09 GB) · [Qwen3 0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) (0.57 GB)
+
+**On this PC (Ollama)** (13): Qwen3-Coder Next · Qwen3-Coder 30B · [Qwen3-Omni 30B-A3B Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) · [Qwen3.8 27B](https://huggingface.co/Qwen/Qwen3.8-27B) · Qwen3.6 27B Coding · Gemma 4 26B-A4B · Nemotron 3 Nano 30B · Devstral 24B · Mistral Small 24B · gpt-oss 20B · Gemma 4 12B · Nemotron 3 Nano 4B · [Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it)
+
+**Ollama Cloud** (17): GLM-5.3 · Kimi K3 · DeepSeek V4 Pro · Kimi K2.7 Code · MiniMax M3 · Mistral Large 3 675B · GLM-5.2 · Kimi K2.6 · MiniMax M2.7 · GLM-5.3 Flash · DeepSeek V4.1 Flash · gpt-oss 20B · *free:* Nemotron 3 Ultra, gpt-oss 120B, Nemotron 3 Super, Gemma 4 31B, Nemotron 3 Nano 30B
+
+**OpenRouter** (50): GLM-5.3 (Z.ai) · Kimi K3 (Moonshot) · DeepSeek V4 Pro · GLM-5.3 Prime · Qwen3.8 Max Prime · Qwen3.8 Max · Hunyuan 4 Preview (Tencent) · Command A Plus (Cohere) · Qwen3.7 Max · Qwen3.8 2.4T-A95B · Xiaomi MiMo V2.6 Pro · Nemotron 3 Ultra 550B · LongCat 2.0 (Meituan) · Kimi K2.7 Code · KAT-Coder Pro V2.5 (Kwaipilot) · Qwen3-Coder Next · MiniMax M3 · GLM-5.2 · Kimi K2.6 · Hunyuan 3 (Tencent) · Qwen3.5 397B-A17B · Arcee Trinity Large Thinking · MiniMax M2.7 · GLM-5.3 Flash · GLM-5.3 FlashX · MiMo V2.6 Pro Ultraspeed (Xiaomi) · Nemotron 3.5 Lightning · Qwen3.7 Flash · DeepSeek V4 Flash (0731) · Qwen3.8 27B · DeepSeek V4.1 Flash · Xiaomi MiMo V2.6 Flash · Qwen3.8 Flash · Ling 3.0 Flash (inclusionAI) · Step 3.7 Flash (StepFun) · Qwen3.6 35B-A3B · Qwen3.8 Omni Flash · gpt-oss 120B · Gemma 4 31B · Gemma 4 26B-A4B · Mistral Small (2603) · IBM Granite 4.2 8B · *free:* Nemotron 3 Ultra 550B, Qwen3.8 27B, Nemotron 3 Super 120B, Cohere North Mini Code, Gemma 4 31B, Gemma 4 26B-A4B, Nemotron 3.5 Lightning, Nemotron 3 Nano Omni
 
 **Hugging Face Inference** (13): GLM-5.3 · Kimi K3 · DeepSeek V4 Pro · Qwen3.8 2.4T-A95B · GLM-5.2 · Qwen3-Coder 480B · Qwen3-Coder Next · GLM-5.3 Flash · DeepSeek V4.1 Flash · Qwen3.8 27B · Gemma 4 31B · Gemma 4 26B-A4B · gpt-oss 120B
 
 **Groq** (2): gpt-oss 120B · gpt-oss 20B
-
-**Ollama Cloud** (16): GLM-5.3 · Kimi K3 · DeepSeek V4 Pro · Kimi K2.7 Code · MiniMax M3 · Mistral Large 3 675B · GLM-5.2 · Kimi K2.6 · MiniMax M2.7 · GLM-5.3 Flash · DeepSeek V4.1 Flash · *free:* Nemotron 3 Ultra, gpt-oss 120B, Nemotron 3 Super, Gemma 4 31B, Nemotron 3 Nano 30B
-
-**Local via Ollama** (13): Qwen3-Coder Next · Qwen3-Coder 30B · [Qwen3-Omni 30B-A3B Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) · [Qwen3.8 27B](https://huggingface.co/Qwen/Qwen3.8-27B) · Qwen3.6 27B Coding · Gemma 4 26B-A4B · Nemotron 3 Nano 30B · Devstral 24B · Mistral Small 24B · gpt-oss 20B · Gemma 4 12B · Nemotron 3 Nano 4B · [Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it)
 
 **Self-hosted, hand-pick only** (2): [Realtime-Venus Omni 9B](https://huggingface.co/inclusionAI/Realtime-Venus) · [JanusFlow 1.3B](https://huggingface.co/deepseek-ai/JanusFlow-1.3B)
 

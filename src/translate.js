@@ -279,7 +279,7 @@ export function toolNamesOf(body) {
   return (body?.tools || []).filter((t) => t && t.input_schema && t.name !== 'DeferredToolPlaceholder').map((t) => t.name);
 }
 
-export function openAIToAnthropic(resp, requestedModel, toolNames = []) {
+export function openAIToAnthropic(resp, requestedModel, toolNames = [], { cwd = null } = {}) {
   const choice = resp.choices?.[0] || {};
   const msg = choice.message || {};
   const content = [];
@@ -303,6 +303,7 @@ export function openAIToAnthropic(resp, requestedModel, toolNames = []) {
     });
   }
   if (!content.length) content.push({ type: 'text', text: '' });
+  for (const c of content) if (c.type === 'tool_use') c.input = absolutizePaths(c.input, cwd);
   const hasTool = content.some((c) => c.type === 'tool_use');
   let stop = STOP_REASONS[choice.finish_reason] || 'end_turn';
   if (hasTool && stop === 'end_turn') stop = 'tool_use';
@@ -356,7 +357,7 @@ function heldSuffix(s) {
  * Text streams live. Tool arguments are collected and sent once complete, after repair,
  * so a cut-off or slightly broken JSON object doesn't make Claude Code reject the call.
  */
-export async function* openAIStreamToAnthropic(stream, requestedModel, toolNames = []) {
+export async function* openAIStreamToAnthropic(stream, requestedModel, toolNames = [], { cwd = null } = {}) {
   const msgId = newId('msg_');
   let index = -1;
   let textOpen = false;
@@ -397,6 +398,7 @@ export async function* openAIStreamToAnthropic(stream, requestedModel, toolNames
     }
   }
   function* emitTool(id, name, input) {
+    input = absolutizePaths(input, cwd);
     yield* closeText();
     index += 1;
     yield sse('content_block_start', { type: 'content_block_start', index, content_block: { type: 'tool_use', id, name, input: {} } });
@@ -592,14 +594,55 @@ function slimSchema(schema, depth = 0) {
   return out;
 }
 
+// The folder Claude Code is working in, from the environment block it sends with every request.
+export function projectDir(body) {
+  const text = [systemToText(body.system), ...(body.messages || []).filter((m) => m.role === 'system').map((m) => (typeof m.content === 'string' ? m.content : systemToText(m.content)))].join('\n');
+  return (text.match(/Primary working directory: *(.+)/) || [])[1]?.trim() || null;
+}
+
+// Claude Code's own instructions are ~25k characters (~7k tokens). A small model on your GPU reads
+// the whole request again on every step, so that alone costs minutes per task, and small models
+// follow short instructions better anyway. They get this instead, plus Claude Code's environment block.
+const SMALL_MODEL_SYSTEM = `You are a coding assistant working inside Claude Code on the user's computer.
+- Use the tools to look at, search, edit and run things. Don't ask the user for file contents or paths; find them yourself.
+- Always use full (absolute) paths inside the project folder.
+- Make small, careful changes that match the existing code. Read a file before editing it.
+- Keep replies short. When the task is done, say what you did in one or two sentences.`;
+
+function environmentBlock(system) {
+  const text = systemToText(system);
+  const at = text.search(/^# ?Environment/m);
+  if (at < 0) return '';
+  const rest = text.slice(at);
+  const end = rest.slice(1).search(/^# /m);
+  return (end < 0 ? rest : rest.slice(0, end + 1)).slice(0, 2000).trim();
+}
+
 export function slimForSmallModel(body) {
   const used = new Set();
   for (const m of body.messages || []) if (Array.isArray(m.content)) for (const b of m.content) if (b?.type === 'tool_use') used.add(b.name);
   const tools = (body.tools || [])
     .filter((t) => t && t.input_schema && t.name !== 'DeferredToolPlaceholder')
     .filter((t) => CORE_TOOLS.has(t.name) || used.has(t.name) || (t.defer_loading && t.name.startsWith('mcp__')))
-    .map((t) => ({ ...t, description: shortText(t.description, 700), input_schema: slimSchema(t.input_schema) }));
-  return { ...body, tools, messages: withSmallModelNote(body, tools) };
+    .map((t) => ({ ...t, description: shortText(t.description, 300), input_schema: slimSchema(t.input_schema) }));
+  const env = environmentBlock(body.system);
+  const system = [SMALL_MODEL_SYSTEM, env].filter(Boolean).join('\n\n');
+  return { ...body, system, tools, messages: withSmallModelNote(body, tools) };
+}
+
+// Small models often give Read/Edit/Write a bare file name ("math.js"); Claude Code needs a full path.
+// Relative paths are completed with the project folder.
+export function absolutizePaths(input, cwd) {
+  if (!cwd || !input || typeof input !== 'object') return input;
+  const sep = cwd.includes('\\') ? '\\' : '/';
+  const isAbs = (p) => /^([a-zA-Z]:[\\/]|[\\/]|~)/.test(p);
+  const out = { ...input };
+  for (const k of ['file_path', 'notebook_path', 'path']) {
+    if (typeof out[k] === 'string' && out[k] && !isAbs(out[k])) {
+      out[k] = cwd.replace(/[\\/]+$/, '') + sep + out[k].replace(/^\.[\\/]/, '').replace(/[\\/]/g, sep);
+    }
+  }
+  return out;
 }
 
 // Small models lose track of Claude Code's long instructions and answer "please give me the path"

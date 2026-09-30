@@ -19,7 +19,7 @@ import {
   LOG_PATH,
 } from './config.js';
 import { classifyError } from './detect.js';
-import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf, compressSkillListing, slimForSmallModel } from './translate.js';
+import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf, compressSkillListing, slimForSmallModel, projectDir } from './translate.js';
 import { notify as desktopNotify } from './notify.js';
 import { createEngineBridge, enginePageHtml } from './engine.js';
 import { teach, listTaught, forget } from './teach.js';
@@ -395,6 +395,7 @@ export function createReroute(options = {}) {
     const key = providerKey(cfg, model.provider);
     const requestedModel = body.model;
     const toolNames = toolNamesOf(body);
+    const cwd = projectDir(body);
     const upstreamModel = await upstreamModelName(model);
     // Leave room for the reply inside the model's context window.
     const room = Math.max(1024, (model.context || 131072) - estimateTokens(body) - 1024);
@@ -475,7 +476,7 @@ export function createReroute(options = {}) {
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-reroute-model': model.id });
         try {
-          for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames)) res.write(ev);
+          for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames, { cwd })) res.write(ev);
         } catch (e) {
           if (!res.destroyed) res.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: e.message } })}\n\n`);
         }
@@ -485,7 +486,7 @@ export function createReroute(options = {}) {
       const content = [];
       let stop = 'end_turn';
       let usage = { input_tokens: 0, output_tokens: 0 };
-      for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames)) {
+      for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames, { cwd })) {
         const data = JSON.parse(ev.split('\ndata: ')[1]);
         if (data.type === 'content_block_start') content[data.index] = { ...data.content_block, ...(data.content_block.type === 'tool_use' ? { input: {} } : {}) };
         if (data.type === 'content_block_delta' && data.delta.type === 'text_delta') content[data.index].text += data.delta.text;
@@ -519,7 +520,7 @@ export function createReroute(options = {}) {
         'x-reroute-model': model.id,
       });
       try {
-        for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames)) res.write(ev);
+        for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames, { cwd })) res.write(ev);
       } catch (e) {
         if (!res.destroyed) {
           log(`fallback stream error: ${e.message}`);
@@ -531,7 +532,7 @@ export function createReroute(options = {}) {
     const json = await upstream.json();
     if (json.error) return { failed: { status: 502, message: json.error.message || JSON.stringify(json.error), type: 'api_error' } };
     markServed(model);
-    return sendJson(res, 200, openAIToAnthropic(json, requestedModel, toolNames), { 'x-reroute-model': model.id });
+    return sendJson(res, 200, openAIToAnthropic(json, requestedModel, toolNames, { cwd }), { 'x-reroute-model': model.id });
   }
 
   function markServed(model) {

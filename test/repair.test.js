@@ -176,3 +176,24 @@ test('context fit and stream retry pick the model that can actually answer', asy
   await app.close();
   oss.close();
 });
+
+test('relative paths in tool calls are completed with the project folder', async () => {
+  const { absolutizePaths, projectDir } = await import('../src/translate.js');
+  const W = 'C:\\work\\app';
+  const body = { system: 'x', messages: [{ role: 'user', content: 'hi' }, { role: 'system', content: [{ type: 'text', text: `# Environment\n - Primary working directory: ${W}\n` }] }] };
+  assert.equal(projectDir(body), W);
+  assert.deepEqual(absolutizePaths({ file_path: 'src/a.js' }, W), { file_path: 'C:\\work\\app\\src\\a.js' });
+  assert.deepEqual(absolutizePaths({ file_path: 'C:\\other\\b.js' }, W), { file_path: 'C:\\other\\b.js' });
+  const events = await collect([{ choices: [{ delta: { content: '<tool_call>{"name":"Read","arguments":{"file_path":"math.js"}}' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }], ['Read']);
+  assert.equal(JSON.parse(events.find((e) => e.data.delta?.type === 'input_json_delta').data.delta.partial_json).file_path, 'math.js', 'without a folder nothing changes');
+  async function* src() {
+    yield `data: ${JSON.stringify({ choices: [{ delta: { content: '<tool_call>{"name":"Read","arguments":{"file_path":"math.js"}}' } }] })}\n\n`;
+    yield 'data: [DONE]\n\n';
+  }
+  let args = null;
+  for await (const ev of openAIStreamToAnthropic(src(), 'm', ['Read'], { cwd: W })) {
+    const d = JSON.parse(ev.trim().split('\n')[1].slice(6));
+    if (d.delta?.type === 'input_json_delta') args = JSON.parse(d.delta.partial_json);
+  }
+  assert.equal(args.file_path, 'C:\\work\\app\\math.js');
+});

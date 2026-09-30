@@ -76,17 +76,27 @@ export const DEFAULT_PROVIDERS = {
 export const DEFAULT_MODELS = [
   // Built-in local engine: runs on your own GPU through WebGPU. Downloaded once, then fully offline.
   { id: 'webgpu-qwen3-4b', label: 'Qwen3 4B Instruct (on this PC)', provider: 'webgpu', model: 'onnx-community/Qwen3-4B-Instruct-2507-ONNX', dtype: 'q4f16', sizeGb: 2.9, context: 24576, hf: 'Qwen/Qwen3-4B-Instruct-2507', note: 'Best local pick: good with tools, 2.9 GB', local: true },
+  { id: 'webgpu-phi-4-mini', label: 'Phi-4 mini Instruct (on this PC)', provider: 'webgpu', model: 'onnx-community/Phi-4-mini-instruct-ONNX', dtype: 'q4f16', sizeGb: 2.55, context: 24576, hf: 'microsoft/Phi-4-mini-instruct', note: 'Microsoft, strong reasoning for its size, 2.55 GB', local: true },
+  { id: 'webgpu-granite-4-micro', label: 'Granite 4.0 micro (on this PC)', provider: 'webgpu', model: 'onnx-community/granite-4.0-micro-ONNX-web', dtype: 'q4f16', sizeGb: 2.3, context: 24576, hf: 'ibm-granite/granite-4.0-micro', note: 'IBM, built for tool calling, 2.3 GB', local: true },
   { id: 'webgpu-gemma4-e4b', label: 'Gemma 4 E4B (on this PC)', provider: 'webgpu', model: 'onnx-community/gemma-4-E4B-it-ONNX', dtype: 'q4f16', kind: 'multimodal', sizeGb: 5.2, context: 16384, hf: 'google/gemma-4-E4B-it', note: 'Google, 5.2 GB', local: true },
   { id: 'webgpu-llama3.2-3b', label: 'Llama 3.2 3B Instruct (on this PC)', provider: 'webgpu', model: 'onnx-community/Llama-3.2-3B-Instruct-ONNX', dtype: 'q4f16', sizeGb: 2.4, context: 24576, hf: 'meta-llama/Llama-3.2-3B-Instruct', note: 'Meta, 2.4 GB', local: true },
   { id: 'webgpu-gemma4-e2b', label: 'Gemma 4 E2B (on this PC)', provider: 'webgpu', model: 'onnx-community/gemma-4-E2B-it-ONNX', dtype: 'q4f16', kind: 'multimodal', sizeGb: 3.4, context: 24576, hf: 'google/gemma-4-E2B-it', note: 'Google, small and quick, 3.4 GB', local: true },
   { id: 'webgpu-qwen3-1.7b', label: 'Qwen3 1.7B (on this PC)', provider: 'webgpu', model: 'onnx-community/Qwen3-1.7B-ONNX', dtype: 'q4f16', sizeGb: 1.4, context: 24576, hf: 'Qwen/Qwen3-1.7B', note: 'Fast, 1.4 GB; simple tasks', local: true },
+  { id: 'webgpu-granite-4-1b', label: 'Granite 4.0 1B (on this PC)', provider: 'webgpu', model: 'onnx-community/granite-4.0-1b-ONNX-web', dtype: 'q4f16', sizeGb: 1.25, context: 24576, hf: 'ibm-granite/granite-4.0-1b', note: 'IBM, small tool caller, 1.25 GB', local: true },
+  { id: 'webgpu-lfm2-1.2b', label: 'LFM2 1.2B (on this PC)', provider: 'webgpu', model: 'onnx-community/LFM2-1.2B-ONNX', dtype: 'q4f16', sizeGb: 0.76, context: 24576, hf: 'LiquidAI/LFM2-1.2B', note: 'Liquid AI, very fast, 0.76 GB', local: true },
+  { id: 'webgpu-llama3.2-1b', label: 'Llama 3.2 1B Instruct (on this PC)', provider: 'webgpu', model: 'onnx-community/Llama-3.2-1B-Instruct-ONNX', dtype: 'q4f16', sizeGb: 1.09, context: 24576, hf: 'meta-llama/Llama-3.2-1B-Instruct', note: 'Meta, small, 1.1 GB', local: true },
   { id: 'webgpu-qwen3-0.6b', label: 'Qwen3 0.6B (on this PC)', provider: 'webgpu', model: 'onnx-community/Qwen3-0.6B-ONNX', dtype: 'q4f16', sizeGb: 0.57, context: 24576, hf: 'Qwen/Qwen3-0.6B', note: 'Tiny, 0.6 GB; chat and quick checks only', local: true },
 
   // Flagships on OpenRouter (one key, every model)
   { id: 'glm-5.3', label: 'GLM-5.3 (Z.ai)', provider: 'openrouter', model: 'z-ai/glm-5.3', note: 'Strong agentic coder, 1M context' },
   { id: 'kimi-k3', label: 'Kimi K3 (Moonshot)', provider: 'openrouter', model: 'moonshotai/kimi-k3', note: 'Top open model for long tool-use sessions' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', provider: 'openrouter', model: 'deepseek/deepseek-v4-pro-0813', note: 'Big reasoning model' },
+  { id: 'glm-5.3-prime', label: 'GLM-5.3 Prime', provider: 'openrouter', model: 'z-ai/glm-5.3-prime', note: 'Newest GLM, 1M context' },
+  { id: 'qwen3.8-max-prime', label: 'Qwen3.8 Max Prime', provider: 'openrouter', model: 'qwen/qwen3.8-max-prime', note: 'Newest Qwen flagship' },
   { id: 'qwen3.8-max', label: 'Qwen3.8 Max', provider: 'openrouter', model: 'qwen/qwen3.8-max-0902' },
+  { id: 'hy4-preview', label: 'Hunyuan 4 Preview (Tencent)', provider: 'openrouter', model: 'tencent/hy4-preview', note: '1M context' },
+  { id: 'command-a-plus', label: 'Command A Plus (Cohere)', provider: 'openrouter', model: 'cohere/command-a-plus', note: 'Strong at tools and retrieval' },
+  { id: 'qwen3.7-max', label: 'Qwen3.7 Max', provider: 'openrouter', model: 'qwen/qwen3.7-max' },
   { id: 'qwen3.8-2.4t', label: 'Qwen3.8 2.4T-A95B', provider: 'openrouter', model: 'qwen/qwen3.8-2.4t-a95b', note: 'Largest open-weight Qwen' },
   { id: 'mimo-v2.6-pro', label: 'Xiaomi MiMo V2.6 Pro', provider: 'openrouter', model: 'xiaomi/mimo-v2.6-pro', note: '1M context' },
   { id: 'nemotron-3-ultra', label: 'Nemotron 3 Ultra 550B', provider: 'openrouter', model: 'nvidia/nemotron-3-ultra-550b-a55b', note: 'NVIDIA flagship' },
@@ -103,6 +113,12 @@ export const DEFAULT_MODELS = [
   { id: 'minimax-m2.7', label: 'MiniMax M2.7', provider: 'openrouter', model: 'minimax/minimax-m2.7' },
   // Fast / cheap on OpenRouter
   { id: 'glm-5.3-flash', label: 'GLM-5.3 Flash', provider: 'openrouter', model: 'z-ai/glm-5.3-flash', note: 'Fast' },
+  { id: 'glm-5.3-flashx', label: 'GLM-5.3 FlashX', provider: 'openrouter', model: 'z-ai/glm-5.3-flashx', note: 'Fastest GLM' },
+  { id: 'mimo-v2.6-pro-ultraspeed', label: 'MiMo V2.6 Pro Ultraspeed (Xiaomi)', provider: 'openrouter', model: 'xiaomi/mimo-v2.6-pro-ultraspeed', note: 'Very fast' },
+  { id: 'nemotron-3.5-lightning', label: 'Nemotron 3.5 Lightning', provider: 'openrouter', model: 'nvidia/nemotron-3.5-lightning', note: 'Fast NVIDIA model' },
+  { id: 'qwen3.7-flash', label: 'Qwen3.7 Flash', provider: 'openrouter', model: 'qwen/qwen3.7-flash', note: 'Fast, 1M context' },
+  { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash (0731)', provider: 'openrouter', model: 'deepseek/deepseek-v4-flash-0731', note: 'Cheap' },
+  { id: 'qwen3.8-27b', label: 'Qwen3.8 27B', provider: 'openrouter', model: 'qwen/qwen3.8-27b' },
   { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash', provider: 'openrouter', model: 'deepseek/deepseek-v4.1-flash', note: 'Fast and cheap' },
   { id: 'mimo-v2.6-flash', label: 'Xiaomi MiMo V2.6 Flash', provider: 'openrouter', model: 'xiaomi/mimo-v2.6-flash', note: 'Fast' },
   { id: 'qwen3.8-flash', label: 'Qwen3.8 Flash', provider: 'openrouter', model: 'qwen/qwen3.8-flash', note: 'Fast, 1M context' },
@@ -159,6 +175,7 @@ export const DEFAULT_MODELS = [
   { id: 'ollama-nemotron-3-ultra-cloud', label: 'Nemotron 3 Ultra via Ollama Cloud', provider: 'ollama', model: 'nemotron-3-ultra:cloud', note: 'Included in the Ollama free tier' },
   { id: 'ollama-gpt-oss-120b-cloud', label: 'gpt-oss 120B via Ollama Cloud', provider: 'ollama', model: 'gpt-oss:120b-cloud', note: 'Included in the Ollama free tier' },
   { id: 'ollama-nemotron-3-super-cloud', label: 'Nemotron 3 Super via Ollama Cloud', provider: 'ollama', model: 'nemotron-3-super:cloud', note: 'Included in the Ollama free tier' },
+  { id: 'ollama-gpt-oss-20b-cloud', label: 'gpt-oss 20B via Ollama Cloud', provider: 'ollama', model: 'gpt-oss:20b-cloud', note: 'Fast; checked against your Ollama plan at startup' },
   { id: 'ollama-gemma4-31b-cloud', label: 'Gemma 4 31B via Ollama Cloud', provider: 'ollama', model: 'gemma4:31b-cloud', note: 'Included in the Ollama free tier' },
   { id: 'ollama-nemotron-3-nano-cloud', label: 'Nemotron 3 Nano 30B via Ollama Cloud', provider: 'ollama', model: 'nemotron-3-nano:30b-cloud', note: 'Included in the Ollama free tier' },
 
@@ -186,6 +203,9 @@ export const DEFAULT_MODELS = [
 // Local Ollama models get `localContext` instead (see DEFAULTS). Unknown models count as DEFAULT_CONTEXT.
 export const DEFAULT_CONTEXT = 131072;
 export const MODEL_CONTEXT = {
+  'glm-5.3-prime': 1000000, 'qwen3.8-max-prime': 1000000, 'hy4-preview': 1048576, 'command-a-plus': 192000, 'qwen3.7-max': 1000000,
+  'glm-5.3-flashx': 1048576, 'mimo-v2.6-pro-ultraspeed': 1048576, 'nemotron-3.5-lightning': 262144, 'qwen3.7-flash': 1000000,
+  'deepseek-v4-flash': 1048576, 'qwen3.8-27b': 1000000, 'ollama-gpt-oss-20b-cloud': 131072,
   'glm-5.3': 1048576,
   'kimi-k3': 1048576,
   'deepseek-v4-pro': 1048576,

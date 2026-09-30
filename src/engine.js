@@ -423,6 +423,8 @@ events.addEventListener('retire', async () => {
   if (loaded) { try { await loaded.model.dispose(); } catch {} loaded = null; }
   $('#state').textContent = 'Another Reroute engine window took over. You can close this one.';
   window.close();
+  // Browsers often refuse window.close() for this window; a blank page still frees the GPU memory.
+  setTimeout(() => { location.href = 'about:blank'; }, 300);
 });
 events.addEventListener('cancel', (e) => { const { id } = JSON.parse(e.data); cancels.get(id)?.interrupt(); });
 events.addEventListener('download', (e) => {
