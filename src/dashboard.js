@@ -113,6 +113,7 @@ export function dashboardHtml() {
   <section class="tab" id="t-models">
     <div class="card">
       <h2>Fallback model</h2>
+      <p class="muted" style="margin-top:0" id="localNote"></p>
       <label class="row muted" style="margin-bottom:12px;cursor:pointer"><input type="checkbox" id="backups" style="accent-color:var(--accent)"> If my pick fails, try the other models as backups (best first)</label>
       <div class="models" id="models"></div>
     </div>
@@ -149,6 +150,7 @@ export function dashboardHtml() {
     </div>
     <div class="card">
       <h2>Behavior</h2>
+      <div class="switch"><div><div class="name">Local only</div><div class="muted">Only use models that run on this PC. Nothing is sent to cloud model providers.</div></div><input type="checkbox" data-k="localOnly"></div>
       <div class="switch"><div><div class="name">Notifications</div><div class="muted">When Reroute switches models, when Claude is back, when usage gets high, when a job finishes.</div></div><input type="checkbox" data-k="notify"></div>
       <div class="switch"><div><div class="name">Quota saver</div><div class="muted">Send Claude Code's small background calls (titles, summaries) to a free model so your Claude limit lasts longer.</div></div><input type="checkbox" data-k="saveQuota"></div>
       <div class="switch"><div><div class="name">Update automatically</div><div class="muted">Install new versions from GitHub on its own and restart quietly.</div></div><input type="checkbox" data-k="autoUpdate"></div>
@@ -215,13 +217,19 @@ function renderModels() {
   const auto = { id: 'auto', label: 'Auto: best available', note: st.resolvedFallback && st.fallbackModel === 'auto' ? 'Currently ' + st.resolvedFallback.label : 'Picks the top model you have access to', usable: true };
   $('#models').innerHTML = [auto, ...st.models].map((m) => {
     const sel = st.fallbackModel === m.id;
-    const tag = m.id === 'auto' ? '' : m.notInPlan ? '<span class="tag">not in your Ollama plan</span>' : m.skippedUntil ? '<span class="tag warn">refused, skipping for now</span>' : m.usable ? '<span class="tag ok">' + esc(m.providerLabel) + '</span>' : '<span class="tag">needs <code>' + esc(m.needs) + '</code></span>';
+    const engine = st.engine || {};
+    const downloading = engine.loading === m.id;
+    const tag = m.id === 'auto' ? '' : m.provider === 'webgpu' && !m.usable ? (downloading ? '<span class="tag warn">downloading ' + Math.round((engine.progress || 0) * 100) + '%</span>' : '<button class="btn" data-dl="' + esc(m.id) + '">Download ' + esc(m.sizeGb) + ' GB</button>') : m.notInPlan ? '<span class="tag">not in your Ollama plan</span>' : m.skippedUntil ? '<span class="tag warn">refused, skipping for now</span>' : m.usable ? '<span class="tag ok">' + esc(m.providerLabel) + '</span>' : '<span class="tag">needs <code>' + esc(m.needs) + '</code></span>';
     const ctx = m.context ? ' · ' + (m.context >= 1e6 ? Math.round(m.context / 1e5) / 10 + 'M' : Math.round(m.context / 1000) + 'k') + ' context' : '';
     return '<label class="model ' + (sel ? 'sel ' : '') + (m.usable ? '' : 'off') + '"><input type="radio" name="m" value="' + esc(m.id) + '"' + (sel ? ' checked' : '') + '>' +
       '<div><div class="name">' + esc(m.label) + '</div><div class="muted">' + esc(m.note || m.model || '') + esc(ctx) + (m.hf ? ' · <a href="https://huggingface.co/' + esc(m.hf) + '" target="_blank" rel="noopener" style="color:var(--accent)">model card</a>' : '') + '</div></div>' + tag + '</label>';
   }).join('');
-  $$('#models input').forEach((i) => i.onchange = async () => { st = await api('config', { fallbackModel: i.value }); render(); });
+  $('#models input').forEach((i) => i.onchange = async () => { st = await api('config', { fallbackModel: i.value }); render(); });
+  $('#models [data-dl]').forEach((b) => b.onclick = async (ev) => { ev.preventDefault(); b.disabled = true; b.textContent = 'Starting…'; const r = await api('engine/download', { id: b.dataset.dl }); if (r.error) { b.textContent = r.error; } tick(); });
   $('#backups').checked = st.backups;
+  const e = st.engine || {};
+  $('#localNote').innerHTML = (st.localOnly ? '<b>Local only:</b> just models that run on this PC. ' : '') + 'Local engine: ' + (e.connected ? 'running' + (e.gpu ? ' on ' + esc(e.gpu) : '') : 'starts when needed') + (e.webgpu === false ? ' (no WebGPU in this browser)' : '') + '. <a href="#" id="openEngine" style="color:var(--accent)">Show engine window</a>';
+  const oe = $('#openEngine'); if (oe) oe.onclick = async (ev) => { ev.preventDefault(); await api('engine/open', {}); };
 }
 
 function menuItems() {

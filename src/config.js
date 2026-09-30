@@ -48,6 +48,12 @@ export const DEFAULT_PROVIDERS = {
     baseUrl: 'https://router.huggingface.co/v1',
     apiKeyEnv: 'HF_TOKEN',
   },
+  webgpu: {
+    label: 'On this PC (WebGPU)',
+    type: 'webgpu',
+    keyless: true,
+    local: true,
+  },
   selfhosted: {
     label: 'Self-hosted (localhost:8000)',
     type: 'openai',
@@ -68,6 +74,14 @@ export const DEFAULT_PROVIDERS = {
 // but you can still select them by hand. Lineup as of September 2026.
 // Add your own with `reroute add` or under "customModels" in ~/.reroute/config.json.
 export const DEFAULT_MODELS = [
+  // Built-in local engine: runs on your own GPU through WebGPU. Downloaded once, then fully offline.
+  { id: 'webgpu-qwen3-4b', label: 'Qwen3 4B Instruct (on this PC)', provider: 'webgpu', model: 'onnx-community/Qwen3-4B-Instruct-2507-ONNX', dtype: 'q4f16', sizeGb: 2.9, context: 24576, hf: 'Qwen/Qwen3-4B-Instruct-2507', note: 'Best local pick: good with tools, 2.9 GB', local: true },
+  { id: 'webgpu-gemma4-e4b', label: 'Gemma 4 E4B (on this PC)', provider: 'webgpu', model: 'onnx-community/gemma-4-E4B-it-ONNX', dtype: 'q4f16', kind: 'multimodal', sizeGb: 5.2, context: 16384, hf: 'google/gemma-4-E4B-it', note: 'Google, 5.2 GB', local: true },
+  { id: 'webgpu-llama3.2-3b', label: 'Llama 3.2 3B Instruct (on this PC)', provider: 'webgpu', model: 'onnx-community/Llama-3.2-3B-Instruct-ONNX', dtype: 'q4f16', sizeGb: 2.4, context: 24576, hf: 'meta-llama/Llama-3.2-3B-Instruct', note: 'Meta, 2.4 GB', local: true },
+  { id: 'webgpu-gemma4-e2b', label: 'Gemma 4 E2B (on this PC)', provider: 'webgpu', model: 'onnx-community/gemma-4-E2B-it-ONNX', dtype: 'q4f16', kind: 'multimodal', sizeGb: 3.4, context: 24576, hf: 'google/gemma-4-E2B-it', note: 'Google, small and quick, 3.4 GB', local: true },
+  { id: 'webgpu-qwen3-1.7b', label: 'Qwen3 1.7B (on this PC)', provider: 'webgpu', model: 'onnx-community/Qwen3-1.7B-ONNX', dtype: 'q4f16', sizeGb: 1.4, context: 24576, hf: 'Qwen/Qwen3-1.7B', note: 'Fast, 1.4 GB; simple tasks', local: true },
+  { id: 'webgpu-qwen3-0.6b', label: 'Qwen3 0.6B (on this PC)', provider: 'webgpu', model: 'onnx-community/Qwen3-0.6B-ONNX', dtype: 'q4f16', sizeGb: 0.57, context: 24576, hf: 'Qwen/Qwen3-0.6B', note: 'Tiny, 0.6 GB; chat and quick checks only', local: true },
+
   // Flagships on OpenRouter (one key, every model)
   { id: 'glm-5.3', label: 'GLM-5.3 (Z.ai)', provider: 'openrouter', model: 'z-ai/glm-5.3', note: 'Strong agentic coder, 1M context' },
   { id: 'kimi-k3', label: 'Kimi K3 (Moonshot)', provider: 'openrouter', model: 'moonshotai/kimi-k3', note: 'Top open model for long tool-use sessions' },
@@ -254,6 +268,9 @@ export const DEFAULTS = {
   // fallback = always the open-source model
   mode: 'auto',
   fallbackModel: 'auto',
+  // Only use models that run on this computer (the WebGPU engine, local Ollama models, your own server).
+  // Cloud providers (OpenRouter, Hugging Face, Ollama Cloud...) are only used when this is off.
+  localOnly: true,
   // When your picked model fails (refused, out of quota, offline), try the other models as backups.
   backups: true,
   // Context size Reroute gives local Ollama models (`reroute pull` creates a copy of the model with it).
@@ -354,8 +371,18 @@ export function isCloudModel(name) {
   return /(:|-)cloud$/.test(name);
 }
 
-// ollama: { reachable: boolean, models: Set<string> } | null
+// Runs on this computer: the WebGPU engine, local (non-cloud) Ollama models, or your own server.
+export function isLocalModel(cfg, m) {
+  if (m.provider === 'webgpu' || m.provider === 'selfhosted') return true;
+  if (m.provider === 'ollama') return !isCloudModel(m.model);
+  const base = cfg.providers[m.provider]?.baseUrl || '';
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(base);
+}
+
+// env: { reachable, models: Set } for Ollama, plus engine: { webgpu, cached: Set } for the WebGPU engine.
 export function modelUsable(cfg, m, ollama = null) {
+  if (cfg.localOnly !== false && !isLocalModel(cfg, m)) return false;
+  if (m.provider === 'webgpu') return Boolean(ollama?.engine?.webgpu !== false && ollama?.engine?.cached?.has(m.model));
   if (!providerUsable(cfg, m.provider)) return false;
   if (m.provider === 'ollama' && !providerKey(cfg, m.provider)) {
     // Keyless Ollama: cloud models just need Ollama running (and `ollama signin`); local ones must be pulled.
@@ -369,6 +396,8 @@ export function modelUsable(cfg, m, ollama = null) {
 // usable model, best first. Models that refused recently (skip) are left out of the backups.
 export function fallbackCandidates(cfg, ollama = null, skip = new Set()) {
   const picked = cfg.fallbackModel && cfg.fallbackModel !== 'auto' ? cfg.models.find((x) => x.id === cfg.fallbackModel) : null;
+  // Local-only mode never sends anything to a cloud model, even one you picked.
+  if (picked && cfg.localOnly !== false && !isLocalModel(cfg, picked)) return fallbackCandidates({ ...cfg, fallbackModel: 'auto' }, ollama, skip);
   if (picked && cfg.backups === false) return [picked];
   const list = [];
   for (const m of cfg.models) {

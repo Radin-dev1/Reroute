@@ -55,6 +55,10 @@ Usage: reroute <command>
   remove <id>          Remove a model you added
   pull <id>            Download a local Ollama model and give it a bigger context (e.g. reroute pull ollama-gemma4-e2b)
   notify <on|off>      Desktop notifications when Reroute switches models (default on)
+  local [status]       Models that run on this PC through WebGPU (no cloud, works offline)
+  local download <id>  Download a local model once (e.g. reroute local download webgpu-qwen3-4b)
+  local open           Show the local engine window
+  local <on|off>       Local-only mode: never use cloud models (default on)
   run "<task>" ["<task>"...] [--model <id|claude>] [--allow-bash] [--no-worktree]
                        Run tasks as parallel Claude Code agents in the background
   jobs [<id>]          List agent jobs, or show one (jobs log <id>, jobs stop <id>, jobs clean)
@@ -617,6 +621,79 @@ switch (cmd) {
       console.error(e.message);
       process.exitCode = 1;
     }
+    break;
+  }
+
+  case 'local': {
+    const [sub = 'status', id] = args;
+    if (sub === 'on' || sub === 'off') {
+      saveConfig({ localOnly: sub === 'on' });
+      console.log(sub === 'on' ? 'Local-only mode on: Reroute only uses models that run on this PC.' : 'Local-only mode off: cloud models (OpenRouter, Hugging Face, Ollama Cloud...) can be used too.');
+      await syncIfInstalled();
+      break;
+    }
+    if (!(await startDetached())) {
+      console.error('Reroute failed to start. Run reroute doctor.');
+      process.exitCode = 1;
+      break;
+    }
+    if (sub === 'open') {
+      const r = await api('engine/open', {});
+      console.log(r.error || 'Opened the local engine window.');
+      break;
+    }
+    if (sub === 'download') {
+      const m = cfg.models.find((x) => x.id === id && x.provider === 'webgpu');
+      if (!m) {
+        console.error(`Usage: reroute local download <id>. Local models:\n${cfg.models.filter((x) => x.provider === 'webgpu').map((x) => `  ${x.id.padEnd(20)} ${x.sizeGb} GB  ${x.note || ''}`).join('\n')}`);
+        process.exitCode = 1;
+        break;
+      }
+      const r = await api('engine/download', { id: m.id });
+      if (r.error) {
+        console.error(r.error);
+        process.exitCode = 1;
+        break;
+      }
+      console.log(`Downloading ${m.label} (${m.sizeGb} GB) from Hugging Face, once. The engine window shows progress.`);
+      let last = -1;
+      for (let i = 0; i < 7200; i++) {
+        await new Promise((r2) => setTimeout(r2, 1000));
+        const s = await running();
+        const e = s?.engine || {};
+        if ((e.cached || []).includes(m.model) && e.loaded && String(e.loaded).startsWith(m.model)) {
+          console.log(`\nReady: ${m.label} runs on this PC now${e.gpu ? ` (${e.gpu})` : ''}. Pick it with: reroute use ${m.id}`);
+          await syncIfInstalled();
+          break;
+        }
+        if (e.error) {
+          console.error(`\nDownload failed: ${e.error}`);
+          process.exitCode = 1;
+          break;
+        }
+        if (e.loading === m.id && e.progress != null) {
+          const pct = Math.floor(e.progress * 100);
+          if (pct !== last) {
+            last = pct;
+            process.stdout.write(`\r  ${String(pct).padStart(3)}%  [${'#'.repeat(Math.floor(pct / 4)).padEnd(25)}]`);
+          }
+        }
+      }
+      break;
+    }
+    const s = await running();
+    const e = s?.engine || {};
+    console.log(`Local-only mode: ${s?.localOnly ? 'on (no cloud models)' : 'off'}`);
+    console.log(`Engine: ${e.connected ? 'running' : 'not running (starts when needed)'}${e.gpu ? ` on ${e.gpu}` : ''}${e.webgpu === false ? ' — this browser has no WebGPU' : ''}`);
+    console.log(`Browser: ${e.browser || 'no Edge or Chrome found'}`);
+    console.log('\nModels that run on this PC:');
+    for (const m of s?.models || []) {
+      if (m.provider !== 'webgpu') continue;
+      const have = (e.cached || []).includes(m.model);
+      console.log(`  ${have ? '✓' : ' '} ${m.id.padEnd(20)} ${String(m.sizeGb).padStart(4)} GB  ${m.label}${have ? '' : '   (reroute local download ' + m.id + ')'}`);
+    }
+    const ollamaLocal = (s?.models || []).filter((m) => m.provider === 'ollama' && m.local && m.usable);
+    if (ollamaLocal.length) console.log(`\nAlso on this PC through Ollama: ${ollamaLocal.map((m) => m.label).join(', ')}`);
     break;
   }
 

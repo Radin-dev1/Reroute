@@ -563,3 +563,39 @@ export function compressSkillListing(body, maxDesc = 70) {
   });
   return saved > 0 ? { body: { ...body, system, messages }, saved } : { body, saved: 0 };
 }
+
+// ---------------------------------------------------------------------------
+// Slimming for small local models. Claude Code sends ~20k tokens of tool definitions with every
+// request (the Artifact tool alone is ~8k). A 4B model running on your GPU has a small context, and
+// every token costs video memory, so it gets the core coding tools with shorter descriptions.
+
+const CORE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'Bash', 'PowerShell', 'Glob', 'Grep', 'TodoWrite', 'WebFetch', 'WebSearch', 'NotebookEdit', 'ToolSearch']);
+
+function shortText(s, n) {
+  if (typeof s !== 'string' || s.length <= n) return s;
+  const para = s.split(/\n\s*\n/)[0];
+  const cut = para.length <= n ? para : para.slice(0, n).replace(/\s+\S*$/, '') + '…';
+  return cut;
+}
+
+function slimSchema(schema, depth = 0) {
+  if (!schema || typeof schema !== 'object' || depth > 6) return schema;
+  if (Array.isArray(schema)) return schema.map((x) => slimSchema(x, depth + 1));
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (k === 'description') out[k] = shortText(v, 160);
+    else if (k === '$schema') continue;
+    else out[k] = typeof v === 'object' ? slimSchema(v, depth + 1) : v;
+  }
+  return out;
+}
+
+export function slimForSmallModel(body) {
+  const used = new Set();
+  for (const m of body.messages || []) if (Array.isArray(m.content)) for (const b of m.content) if (b?.type === 'tool_use') used.add(b.name);
+  const tools = (body.tools || [])
+    .filter((t) => t && t.input_schema && t.name !== 'DeferredToolPlaceholder')
+    .filter((t) => CORE_TOOLS.has(t.name) || used.has(t.name) || (t.defer_loading && t.name.startsWith('mcp__')))
+    .map((t) => ({ ...t, description: shortText(t.description, 700), input_schema: slimSchema(t.input_schema) }));
+  return { ...body, tools };
+}

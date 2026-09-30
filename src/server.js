@@ -11,14 +11,16 @@ import {
   modelFromPickerId,
   pickerId,
   isCloudModel,
+  isLocalModel,
   ollamaRoot,
   ollamaContextName,
   HOME_DIR,
   LOG_PATH,
 } from './config.js';
 import { classifyError } from './detect.js';
-import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf, compressSkillListing } from './translate.js';
+import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf, compressSkillListing, slimForSmallModel } from './translate.js';
 import { notify as desktopNotify } from './notify.js';
+import { createEngineBridge, enginePageHtml } from './engine.js';
 import { checkForUpdate, applyUpdate, currentVersion } from './update.js';
 import { pickerRows } from './picker.js';
 import { setPickerRows } from './install.js';
@@ -66,6 +68,20 @@ export function createReroute(options = {}) {
     onFallback: false, // told the user we switched; tell them again when Claude is back
     lastNoFallbackNotice: 0,
   };
+
+  let enginePort = cfg.port;
+  const engine = createEngineBridge({ get port() { return enginePort; }, log: (m) => log(m) });
+
+  // What's usable right now: Ollama's models plus what the WebGPU engine has downloaded.
+  async function usableEnv() {
+    const oll = await ollamaInfo();
+    const e = engine.info;
+    return { ...oll, engine: { webgpu: e.webgpu, cached: new Set(e.cached || []) } };
+  }
+
+  // Small local models get the slimmed request (core tools, short descriptions).
+  const isSmall = (m) => (m.context || 131072) <= 65536;
+  const bodyFor = (m, body) => (isSmall(m) ? slimForSmallModel(body) : body);
 
   function notify(title, message) {
     if (cfg.notify === false || options.notify === false) return;
@@ -206,7 +222,7 @@ export function createReroute(options = {}) {
   }
 
   async function candidates() {
-    return fallbackCandidates(cfg, await ollamaInfo(), skipped());
+    return fallbackCandidates(cfg, await usableEnv(), skipped());
   }
 
   async function currentFallback() {
@@ -361,6 +377,7 @@ export function createReroute(options = {}) {
   // Responds to the client on success. Returns { failed } without responding when the provider refused,
   // so the caller can try the next model.
   async function callFallback(res, body, signal, model) {
+    body = bodyFor(model, body);
     const provider = cfg.providers[model.provider];
     if (!provider) return { failed: { status: 500, message: `unknown provider "${model.provider}"`, type: 'api_error' } };
     const key = providerKey(cfg, model.provider);
@@ -369,7 +386,8 @@ export function createReroute(options = {}) {
     const upstreamModel = await upstreamModelName(model);
     // Leave room for the reply inside the model's context window.
     const room = Math.max(1024, (model.context || 131072) - estimateTokens(body) - 1024);
-    const maxTokens = Math.min(model.maxTokens || Infinity, room);
+    // Small local models also keep replies to a quarter of their window, leaving room for the conversation.
+    const maxTokens = Math.min(model.maxTokens || Infinity, room, isSmall(model) ? Math.floor((model.context || 131072) / 4) : Infinity);
 
     if (provider.type === 'anthropic') {
       const out = { ...body, model: upstreamModel };
@@ -406,6 +424,54 @@ export function createReroute(options = {}) {
     }
 
     const oreq = anthropicToOpenAI(body, upstreamModel, { maxTokens });
+
+    if (provider.type === 'webgpu') {
+      let stream;
+      try {
+        stream = await engine.chat(
+          {
+            model: { id: model.id, repo: model.model, dtype: model.dtype || 'q4f16', kind: model.kind || 'text', label: model.label },
+            messages: oreq.messages,
+            tools: oreq.tools || [],
+            max_tokens: oreq.max_tokens,
+            temperature: oreq.temperature,
+          },
+          signal
+        );
+      } catch (e) {
+        return { failed: { status: e.status || 503, message: e.message, type: 'api_error' } };
+      }
+      const bytes = (async function* () {
+        for await (const s of stream) yield Buffer.from(s);
+      })();
+      const peeked = await peekStream(bytes);
+      if (peeked.failed) return peeked;
+      markServed(model);
+      if (body.stream) {
+        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive', 'x-reroute-model': model.id });
+        try {
+          for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames)) res.write(ev);
+        } catch (e) {
+          if (!res.destroyed) res.write(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'api_error', message: e.message } })}\n\n`);
+        }
+        return res.end();
+      }
+      // Non-streaming: collect the stream into one reply.
+      const content = [];
+      let stop = 'end_turn';
+      let usage = { input_tokens: 0, output_tokens: 0 };
+      for await (const ev of openAIStreamToAnthropic(peeked.stream, requestedModel, toolNames)) {
+        const data = JSON.parse(ev.split('\ndata: ')[1]);
+        if (data.type === 'content_block_start') content[data.index] = { ...data.content_block, ...(data.content_block.type === 'tool_use' ? { input: {} } : {}) };
+        if (data.type === 'content_block_delta' && data.delta.type === 'text_delta') content[data.index].text += data.delta.text;
+        if (data.type === 'content_block_delta' && data.delta.type === 'input_json_delta') content[data.index].input = JSON.parse(data.delta.partial_json || '{}');
+        if (data.type === 'message_delta') {
+          stop = data.delta.stop_reason;
+          usage = data.usage || usage;
+        }
+      }
+      return sendJson(res, 200, { id: 'msg_local', type: 'message', role: 'assistant', model: requestedModel, content, stop_reason: stop, stop_sequence: null, usage }, { 'x-reroute-model': model.id });
+    }
     const headers = { 'content-type': 'application/json', ...(provider.headers || {}) };
     if (key) headers.authorization = `Bearer ${key}`;
     const upstream = await fetch(provider.baseUrl.replace(/\/$/, '') + '/chat/completions', {
@@ -460,13 +526,15 @@ export function createReroute(options = {}) {
     if (first) list = cfg.backups === false ? [first] : [first, ...list.filter((m) => m.id !== first.id)];
 
     // Only models whose context window holds this conversation (plus room to answer).
+    const reserve = (m) => Math.min(body.max_tokens || 8192, 16384, Math.floor((m.context || 131072) / 4));
+    const needFor = (m) => estimateTokens(bodyFor(m, body)) + reserve(m);
     const need = estimateTokens(body) + Math.min(body.max_tokens || 8192, 16384);
-    const fits = list.filter((m) => (m.context || 131072) >= need);
+    const fits = list.filter((m) => (m.context || 131072) >= needFor(m));
     if (list.length && !fits.length) {
       // Too long for all of them: drop the oldest turns so it fits the biggest one.
       const biggest = list.reduce((a, b) => ((b.context || 0) > (a.context || 0) ? b : a));
-      const budget = (biggest.context || 131072) - Math.min(body.max_tokens || 8192, 16384);
-      const trimmed = trimToFit(body, budget);
+      const budget = (biggest.context || 131072) - reserve(biggest);
+      const trimmed = trimToFit(bodyFor(biggest, body), budget);
       if (!trimmed) {
         return anthropicError(
           res,
@@ -590,7 +658,7 @@ export function createReroute(options = {}) {
 
   async function statusPayload() {
     const fb = await currentFallback();
-    const oll = await ollamaInfo();
+    const oll = await usableEnv();
     const selfHosted = {};
     for (const [name, p] of Object.entries(cfg.providers)) {
       if (name !== 'ollama' && p.keyless && !providerKey(cfg, name)) selfHosted[name] = await selfHostedUp(name);
@@ -611,6 +679,8 @@ export function createReroute(options = {}) {
       supervised: Boolean(process.env.REROUTE_SUPERVISED),
       planChecked: Boolean(state.planChecked),
       skillTokensSaved: Math.round(state.skillCharsSaved / 3.5),
+      localOnly: cfg.localOnly !== false,
+      engine: engine.info,
       version: currentVersion(),
       usage: state.usage,
       update: state.update,
@@ -620,6 +690,7 @@ export function createReroute(options = {}) {
         notify: cfg.notify !== false,
         autoUpdate: cfg.autoUpdate !== false,
         saveQuota: Boolean(cfg.saveQuota),
+        localOnly: cfg.localOnly !== false,
         picker: cfg.picker || 'ready',
         pickerOrder: cfg.pickerOrder || [],
         pickerHidden: cfg.pickerHidden || [],
@@ -635,7 +706,9 @@ export function createReroute(options = {}) {
         const keyless = Boolean(cfg.providers[m.provider]?.keyless);
         let needs = null;
         if (!usable) {
-          if (!providerUsable(cfg, m.provider)) needs = cfg.providers[m.provider]?.apiKeyEnv || 'API key';
+          if (cfg.localOnly !== false && !isLocalModel(cfg, m)) needs = 'cloud models on (local-only mode is on)';
+          else if (m.provider === 'webgpu') needs = oll.engine?.webgpu === false ? 'a browser with WebGPU' : `download (${m.sizeGb} GB)`;
+          else if (!providerUsable(cfg, m.provider)) needs = cfg.providers[m.provider]?.apiKeyEnv || 'API key';
           else if (m.provider in selfHosted) needs = `a server at ${cfg.providers[m.provider].baseUrl}`;
           else if (keyless && !oll.reachable) needs = 'Ollama running';
           else if (keyless && !isCloudModel(m.model)) needs = `ollama pull ${m.model}`;
@@ -674,7 +747,7 @@ export function createReroute(options = {}) {
       if (typeof patch.fallbackModel === 'string') allowed.fallbackModel = patch.fallbackModel;
       if (typeof patch.backups === 'boolean') allowed.backups = patch.backups;
       if (Number.isFinite(patch.cooldownMinutes) && patch.cooldownMinutes > 0) allowed.cooldownMinutes = patch.cooldownMinutes;
-      for (const k of ['notify', 'autoUpdate', 'saveQuota']) if (typeof patch[k] === 'boolean') allowed[k] = patch[k];
+      for (const k of ['notify', 'autoUpdate', 'saveQuota', 'localOnly']) if (typeof patch[k] === 'boolean') allowed[k] = patch[k];
       if (['ready', 'all', 'off'].includes(patch.picker)) allowed.picker = patch.picker;
       const ids = new Set(['auto', ...cfg.models.map((m) => m.id)]);
       if (Array.isArray(patch.pickerOrder)) allowed.pickerOrder = patch.pickerOrder.filter((x) => ids.has(x));
@@ -695,6 +768,30 @@ export function createReroute(options = {}) {
       return !origin || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
     };
     if (req.method === 'POST' && !sameOrigin()) return sendJson(res, 403, { error: 'forbidden' });
+
+    if (url.pathname === '/reroute/api/engine/download' && req.method === 'POST') {
+      let b = {};
+      try {
+        b = JSON.parse((await readBody(req)).toString('utf8'));
+      } catch {}
+      const m = cfg.models.find((x) => x.id === b.id && x.provider === 'webgpu');
+      if (!m) return sendJson(res, 404, { error: 'not a local WebGPU model' });
+      try {
+        engine.download({ id: m.id, repo: m.model, dtype: m.dtype || 'q4f16', kind: m.kind || 'text', label: m.label });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+      log(`Downloading ${m.label} (${m.sizeGb} GB) to the local engine`);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (url.pathname === '/reroute/api/engine/open' && req.method === 'POST') {
+      try {
+        engine.launch({ visible: true });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+      return sendJson(res, 200, { ok: true });
+    }
 
     if (url.pathname === '/reroute/api/picker/sync' && req.method === 'POST') {
       const status = await statusPayload();
@@ -776,6 +873,17 @@ export function createReroute(options = {}) {
           return res.end(dashboardHtml());
         }
       }
+      if (url.pathname === '/reroute/engine' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        return res.end(enginePageHtml());
+      }
+      if (url.pathname.startsWith('/reroute/engine/')) {
+        // Only the engine page (same origin) may talk to the engine endpoints.
+        const origin = req.headers.origin;
+        if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) return sendJson(res, 403, { error: 'forbidden' });
+        if (await engine.handle(req, res, url, readBody)) return;
+        return sendJson(res, 404, { error: 'not found' });
+      }
       if (url.pathname.startsWith('/reroute/api/')) return await handleApi(req, res, url);
 
       const bodyBuf = ['GET', 'HEAD'].includes(req.method) ? Buffer.alloc(0) : await readBody(req);
@@ -810,10 +918,12 @@ export function createReroute(options = {}) {
     get config() {
       return cfg;
     },
+    engine,
     listen(port = cfg.port, host = cfg.host) {
       return new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(port, host, () => {
+          enginePort = server.address().port;
           log(`Reroute listening on http://${host}:${server.address().port} (mode: ${cfg.mode})`);
           if (options.probe !== false) {
             setTimeout(() => probeOllamaCloud().catch(() => {}), 500).unref();
