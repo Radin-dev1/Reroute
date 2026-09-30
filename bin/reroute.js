@@ -27,6 +27,7 @@ import readline from 'node:readline/promises';
 import path from 'node:path';
 import os from 'node:os';
 import * as jobs from '../src/jobs.js';
+import * as teachLib from '../src/teach.js';
 import * as tor from '../src/tor.js';
 import { applyUpdate, checkForUpdate, currentVersion } from '../src/update.js';
 import { notify } from '../src/notify.js';
@@ -68,6 +69,12 @@ Usage: reroute <command>
                        Tor tools for Claude (fetch pages and .onion sites through Tor, open Tor Browser)
   update [--check]     Update Reroute from GitHub (it also updates itself unless autoUpdate is off)
   version              Show the installed version
+  teach <link|path> [--name n] [--description "..."] [--rows N] [--install all|a,b]
+                       Give Claude a skill from a link: a GitHub repo (skills, plugin
+                       marketplace, or any project's docs), a Hugging Face dataset or model,
+                       a web page, or a local folder/file
+  taught               List skills you added with teach
+  forget <name>        Remove a skill you added with teach
   skills [list]        Skill packs from github.com/alirezarezvani/claude-skills (~380 skills)
   skills add <pack|plugin...> [--allow-hooks]
                        Install a pack (coding, engineering, product, research, productivity,
@@ -694,6 +701,67 @@ switch (cmd) {
     }
     const ollamaLocal = (s?.models || []).filter((m) => m.provider === 'ollama' && m.local && m.usable);
     if (ollamaLocal.length) console.log(`\nAlso on this PC through Ollama: ${ollamaLocal.map((m) => m.label).join(', ')}`);
+    break;
+  }
+
+  case 'teach': {
+    const opt = (k) => {
+      const i = args.indexOf('--' + k);
+      return i >= 0 ? args[i + 1] : undefined;
+    };
+    const valued = new Set(['--name', '--description', '--rows', '--install']);
+    const input = args.find((a, i) => !a.startsWith('--') && !valued.has(args[i - 1]));
+    if (!input) {
+      console.error('Usage: reroute teach <github link | huggingface dataset/model link | web page | folder> [--name n] [--description "..."] [--rows N]');
+      process.exitCode = 1;
+      break;
+    }
+    try {
+      console.log(`Reading ${input}…`);
+      const r = await teachLib.teach(input, {
+        name: opt('name'),
+        description: opt('description'),
+        rows: opt('rows'),
+        token: providerKey(cfg, 'huggingface'),
+        runClaude: skills.runClaude,
+      });
+      if (r.type === 'marketplace') {
+        console.log(`Added the plugin marketplace "${r.marketplace}" to Claude Code (${r.plugins.length} plugins).`);
+        const want = opt('install');
+        const pick = want === 'all' ? r.plugins : want ? r.plugins.filter((p) => want.split(',').includes(p.name)) : [];
+        for (const p of pick) {
+          const out = skills.runClaude(['plugin', 'install', `${p.name}@${r.marketplace}`]);
+          console.log(`  ${out.ok ? 'installed' : 'failed   '} ${p.name}`);
+        }
+        if (!pick.length) {
+          for (const p of r.plugins.slice(0, 25)) console.log(`  ${p.name.padEnd(28)} ${p.description.slice(0, 70)}`);
+          if (r.plugins.length > 25) console.log(`  … and ${r.plugins.length - 25} more`);
+          console.log(`\nInstall some with: reroute teach ${input} --install name1,name2   (or --install all)`);
+        }
+      } else {
+        for (const s of r.skills) {
+          console.log(`Added skill "${s.name}" → ${s.dir}`);
+          if (s.scripts?.length) console.log(`  It includes ${s.scripts.length} script(s) Claude may run (${s.scripts.slice(0, 4).join(', ')}${s.scripts.length > 4 ? ', …' : ''}). Only keep skills from sources you trust.`);
+        }
+        if (r.type === 'dataset') console.log('It has the dataset card, columns and sample rows. Claude uses it as reference; it does not retrain Claude.');
+        console.log('Restart Claude Code (or start a new session) to load it. Remove it with: reroute forget <name>');
+      }
+    } catch (e) {
+      console.error(`Couldn't make a skill from that: ${e.message}`);
+      process.exitCode = 1;
+    }
+    break;
+  }
+
+  case 'taught': {
+    const list = teachLib.listTaught();
+    if (!list.length) console.log('No skills added yet. Try: reroute teach https://github.com/owner/repo');
+    for (const s of list) console.log(`${s.name.padEnd(30)} ${s.type.padEnd(11)} ${s.source}`);
+    break;
+  }
+
+  case 'forget': {
+    console.log(teachLib.forget(args[0] || '') ? `Removed ${args[0]}.` : `No skill "${args[0]}" added by Reroute. See: reroute taught`);
     break;
   }
 

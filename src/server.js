@@ -21,6 +21,8 @@ import { classifyError } from './detect.js';
 import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic, estimateTokens, trimToFit, toolNamesOf, compressSkillListing, slimForSmallModel } from './translate.js';
 import { notify as desktopNotify } from './notify.js';
 import { createEngineBridge, enginePageHtml } from './engine.js';
+import { teach, listTaught, forget } from './teach.js';
+import { runClaude } from './skills.js';
 import { checkForUpdate, applyUpdate, currentVersion } from './update.js';
 import { pickerRows } from './picker.js';
 import { setPickerRows } from './install.js';
@@ -768,6 +770,32 @@ export function createReroute(options = {}) {
       return !origin || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin);
     };
     if (req.method === 'POST' && !sameOrigin()) return sendJson(res, 403, { error: 'forbidden' });
+
+    if (url.pathname === '/reroute/api/taught') return sendJson(res, 200, { skills: listTaught() });
+    if (url.pathname === '/reroute/api/teach' && req.method === 'POST') {
+      let b = {};
+      try {
+        b = JSON.parse((await readBody(req)).toString('utf8'));
+      } catch {}
+      try {
+        const r = await teach(b.source, { name: b.name || undefined, description: b.description || undefined, rows: b.rows, token: providerKey(cfg, 'huggingface'), runClaude });
+        if (r.type === 'marketplace' && b.install) {
+          const pick = b.install === 'all' ? r.plugins : r.plugins.filter((p) => String(b.install).split(',').includes(p.name));
+          r.installed = pick.map((p) => ({ name: p.name, ok: runClaude(['plugin', 'install', `${p.name}@${r.marketplace}`]).ok }));
+        }
+        log(`Taught Claude from ${b.source}: ${r.type}${r.skills ? ' (' + r.skills.map((x) => x.name).join(', ') + ')' : ''}`);
+        return sendJson(res, 200, r);
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+    }
+    if (url.pathname === '/reroute/api/forget' && req.method === 'POST') {
+      let b = {};
+      try {
+        b = JSON.parse((await readBody(req)).toString('utf8'));
+      } catch {}
+      return sendJson(res, 200, { removed: forget(b.name || '') });
+    }
 
     if (url.pathname === '/reroute/api/engine/download' && req.method === 'POST') {
       let b = {};

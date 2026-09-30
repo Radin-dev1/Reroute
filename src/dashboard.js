@@ -92,6 +92,7 @@ export function dashboardHtml() {
     <button data-t="status" class="on">Status</button>
     <button data-t="models">Models</button>
     <button data-t="agents">Agents</button>
+    <button data-t="skills">Skills</button>
     <button data-t="settings">Settings</button>
   </nav>
 
@@ -134,6 +135,22 @@ export function dashboardHtml() {
       <span class="muted" id="jobMsg"></span>
     </div>
     <div class="card"><h2>Jobs</h2><div id="jobs" class="muted">No jobs yet.</div></div>
+  </section>
+
+  <section class="tab" id="t-skills">
+    <div class="card">
+      <h2>Teach Claude something</h2>
+      <p class="muted" style="margin-top:0">Paste a link and Reroute turns it into a skill Claude can use: a GitHub repo (skills, a plugin marketplace, or any project's docs), a Hugging Face dataset or model, a web page, or a folder on this PC.</p>
+      <input type="text" id="teachSrc" placeholder="https://github.com/owner/repo   ·   https://huggingface.co/datasets/owner/name   ·   a folder on this PC">
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="teachName" placeholder="Skill name (optional)" style="flex:1;min-width:160px">
+        <label class="muted row" style="gap:6px">Sample rows <select id="teachRows" style="width:auto"><option>20</option><option selected>50</option><option>200</option><option>1000</option></select></label>
+      </div>
+      <input type="text" id="teachDesc" placeholder="When should Claude use it? (optional — a good one helps Claude pick it)" style="margin-top:8px">
+      <div class="row" style="margin-top:10px"><button class="btn primary" id="teachGo">Add skill</button><span class="muted" id="teachMsg"></span></div>
+      <div id="teachPlugins" style="margin-top:10px"></div>
+    </div>
+    <div class="card"><h2>Your added skills</h2><div id="taught" class="muted">None yet.</div></div>
   </section>
 
   <section class="tab" id="t-settings">
@@ -351,6 +368,38 @@ $('#installUpdate').onclick = async () => {
   $('#updateText').textContent = 'Updated to ' + (r.current?.version || '') + ' (' + (r.current?.commit || '') + '). Restarting…';
   setTimeout(() => location.reload(), 4000);
 };
+
+async function renderTaught() {
+  const r = await api('taught');
+  const list = r.skills || [];
+  $('#taught').innerHTML = list.length ? list.map((s) => '<div class="job"><div class="head"><span class="tag">' + esc(s.type) + '</span><b style="flex:1">' + esc(s.name) + '</b><button class="btn" data-forget="' + esc(s.name) + '">Remove</button></div><div class="muted">' + esc(s.description) + '</div><div class="muted">' + esc(s.source) + '</div></div>').join('') : 'None yet.';
+  $('[data-forget]').forEach((b) => b.onclick = async () => { await api('forget', { name: b.dataset.forget }); renderTaught(); });
+}
+$('#teachGo').onclick = async () => {
+  const source = $('#teachSrc').value.trim();
+  if (!source) { $('#teachMsg').textContent = 'Paste a link first.'; return; }
+  $('#teachGo').disabled = true; $('#teachMsg').textContent = 'Reading it… (big repos or datasets take a moment)'; $('#teachPlugins').innerHTML = '';
+  const r = await api('teach', { source, name: $('#teachName').value.trim(), description: $('#teachDesc').value.trim(), rows: Number($('#teachRows').value) });
+  $('#teachGo').disabled = false;
+  if (r.error) { $('#teachMsg').textContent = r.error; return; }
+  if (r.type === 'marketplace') {
+    $('#teachMsg').textContent = 'Added the plugin marketplace "' + r.marketplace + '" (' + r.plugins.length + ' plugins). Pick what to install:';
+    $('#teachPlugins').innerHTML = r.plugins.map((p) => '<label class="row muted" style="margin:4px 0"><input type="checkbox" value="' + esc(p.name) + '"> <b>' + esc(p.name) + '</b> ' + esc(p.description.slice(0, 90)) + '</label>').join('') + '<button class="btn primary" id="installPicked" style="margin-top:8px">Install selected</button>';
+    $('#installPicked').onclick = async () => {
+      const names = $('#teachPlugins input:checked').map((i) => i.value);
+      if (!names.length) return;
+      $('#installPicked').disabled = true; $('#installPicked').textContent = 'Installing…';
+      const x = await api('teach', { source, install: names.join(',') });
+      $('#teachPlugins').innerHTML = '<div class="muted">' + (x.installed || []).map((i) => (i.ok ? '✓ ' : '✗ ') + esc(i.name)).join('<br>') + '<br>Restart Claude Code to load them.</div>';
+    };
+  } else {
+    const scripts = (r.skills || []).flatMap((s) => s.scripts || []);
+    $('#teachMsg').textContent = 'Added ' + r.skills.map((s) => s.name).join(', ') + '. Start a new Claude Code session to use it.' + (scripts.length ? ' Note: it includes ' + scripts.length + ' script(s) Claude may run.' : '');
+    $('#teachSrc').value = ''; $('#teachName').value = ''; $('#teachDesc').value = '';
+  }
+  renderTaught();
+};
+renderTaught();
 
 function render() { renderStatus(); renderModels(); renderMenu(); renderSettings(); renderJobs(); }
 $$('#mode button').forEach((b) => b.onclick = async () => { st = await api('config', { mode: b.dataset.v }); render(); });
