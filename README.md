@@ -84,6 +84,25 @@ Under the hood these are rows in the `modelPicker` setting in `~/.claude/setting
 
 **How the order works:** your pick goes first. If it refuses (not in your plan, quota used up, offline, not downloaded), Reroute moves to the next model on the list below and skips the one that refused for a while. With `auto`, it starts at the top.
 
+## Models on your own PC
+
+Reroute has a built-in engine that runs open models on your graphics card through WebGPU, with no extra programs and no cloud. It opens a hidden Edge or Chrome window with its own profile, loads the model there with [Transformers.js](https://github.com/huggingface/transformers.js), and sends Claude Code's requests to it. Each model downloads once from Hugging Face; after that it works offline.
+
+```bash
+reroute local                              # what's downloaded, which GPU
+reroute local download webgpu-qwen3-4b     # download a model once (progress shown)
+reroute local open                         # show the engine window
+reroute local off                          # also allow cloud models (on = local only)
+```
+
+**Local-only mode is on by default**: when Claude runs out, only models on this PC are used, and nothing is sent to cloud providers. Turn it off to also use OpenRouter, Hugging Face, Ollama Cloud and the others.
+
+What to expect (measured on an RTX 5060 Ti, 8 GB):
+
+- Qwen3 4B reads a 6,000-token prompt in about 12 seconds; a small Claude Code task (find a file, read it, answer) takes a few minutes.
+- Small models get a lighter version of Claude Code's request: short instructions instead of Claude Code's ~25k-character ones, the core tools, and the project folder, which brings a request from ~26k tokens to ~6k.
+- They're much weaker than Claude: good for small edits and questions, not big multi-file work. For that, use Claude or a cloud model.
+
 ## Built-in models (September 2026)
 
 108 models, listed in the order Reroute tries them. With local-only mode on (the default), only the "On this PC" ones are used.
