@@ -51,6 +51,60 @@ export function setPickerRows(rows) {
   return rows.length;
 }
 
+// ---------------------------------------------------------------------------
+// The Claude desktop app sets ANTHROPIC_BASE_URL itself for its Code sessions, which overrides the
+// one in ~/.claude/settings.json. Claude Code's OS-level managed settings outrank that, so this is
+// where the desktop app has to be pointed at Reroute. Writing there needs administrator rights.
+
+export function managedSettingsPath() {
+  if (process.platform === 'win32') return path.join(process.env.ProgramFiles || 'C:\\Program Files', 'ClaudeCode', 'managed-settings.json');
+  if (process.platform === 'darwin') return '/Library/Application Support/ClaudeCode/managed-settings.json';
+  return '/etc/claude-code/managed-settings.json';
+}
+
+export function desktopRouting() {
+  try {
+    const j = JSON.parse(fs.readFileSync(managedSettingsPath(), 'utf8'));
+    return { on: Boolean(j.env?.REROUTE_MANAGED), baseUrl: j.env?.ANTHROPIC_BASE_URL || null };
+  } catch {
+    return { on: false, baseUrl: null };
+  }
+}
+
+// Returns { file } or throws with code 'EPERM' when not running as administrator.
+export function setDesktopRouting(on, baseUrl) {
+  const file = managedSettingsPath();
+  let j = {};
+  try {
+    j = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    if (e.code !== 'ENOENT') throw e;
+  }
+  const createdByUs = j.env?.REROUTE_MANAGED === 'created';
+  j.env = j.env || {};
+  if (on) {
+    const fresh = !fs.existsSync(file);
+    // "merge" keeps every other settings source working: only these env keys are enforced.
+    if (fresh || !j.parentSettingsBehavior) j.parentSettingsBehavior = 'merge';
+    j.env.ANTHROPIC_BASE_URL = baseUrl;
+    j.env.ENABLE_TOOL_SEARCH = j.env.ENABLE_TOOL_SEARCH || 'true';
+    j.env.REROUTE_MANAGED = fresh ? 'created' : j.env.REROUTE_MANAGED || 'added';
+  } else {
+    if (!j.env.REROUTE_MANAGED) return { file, changed: false };
+    delete j.env.ANTHROPIC_BASE_URL;
+    delete j.env.REROUTE_MANAGED;
+    if (j.env.ENABLE_TOOL_SEARCH === 'true') delete j.env.ENABLE_TOOL_SEARCH;
+    if (!Object.keys(j.env).length) delete j.env;
+    if (createdByUs && Object.keys(j).every((k) => k === 'parentSettingsBehavior')) {
+      fs.rmSync(file);
+      return { file, changed: true, removed: true };
+    }
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(j, null, 2) + '\n');
+  return { file, changed: true };
+}
+
 export function isInstalled() {
   const settings = readJson(CLAUDE_SETTINGS);
   return /^http:\/\/(127\.0\.0\.1|localhost):\d+\/?$/.test(settings.env?.ANTHROPIC_BASE_URL || '');

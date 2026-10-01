@@ -18,6 +18,9 @@ import {
   claudeBaseUrl,
   autostartInstalled,
   toolSearchOn,
+  desktopRouting,
+  setDesktopRouting,
+  managedSettingsPath,
   CLI_PATH,
   CLAUDE_SETTINGS,
 } from '../src/install.js';
@@ -56,6 +59,9 @@ Usage: reroute <command>
   remove <id>          Remove a model you added
   pull <id>            Download a local Ollama model and give it a bigger context (e.g. reroute pull ollama-gemma4-e2b)
   notify <on|off>      Desktop notifications when Reroute switches models (default on)
+  desktop <on|off|status>
+                       Route the Claude desktop app's Code tab through Reroute too (needs an
+                       administrator terminal: the app overrides the normal setting)
   local [status]       Models that run on this PC through WebGPU (no cloud, works offline)
   local download <id>  Download a local model once (e.g. reroute local download webgpu-qwen3-4b)
   local open           Show the local engine window
@@ -389,6 +395,12 @@ async function doctor(fix) {
     async () => setStatusLine(true)
   );
 
+  await check('Desktop app', async () => {
+    const d = desktopRouting();
+    if (d.on) return { level: 'ok', msg: `routed through Reroute (${d.baseUrl})` };
+    return { level: 'warn', msg: 'its Code tab bypasses Reroute (the app sets its own address). Fix: run "reroute desktop on" in an administrator PowerShell' };
+  });
+
   const bad = results.filter((r) => r.level === 'bad').length;
   const warn = results.filter((r) => r.level === 'warn').length;
   console.log(bad || warn ? `\n${bad} problems, ${warn} warnings.${fix ? '' : ' Run `reroute doctor --fix` to fix them.'}` : '\nEverything looks good.');
@@ -626,6 +638,34 @@ switch (cmd) {
       throw new Error(`Unknown: reroute skills ${sub}. Use list, add, remove or update.`);
     } catch (e) {
       console.error(e.message);
+      process.exitCode = 1;
+    }
+    break;
+  }
+
+  case 'desktop': {
+    const sub = args[0] || 'status';
+    const url = `http://127.0.0.1:${cfg.port}`;
+    if (sub === 'status') {
+      const d = desktopRouting();
+      console.log(d.on ? `Desktop app: routed through Reroute (${d.baseUrl}), set in ${managedSettingsPath()}` : 'Desktop app: NOT routed through Reroute. The Claude desktop app sets its own address for its Code tab, so it bypasses Reroute until you run (in PowerShell as administrator):  reroute desktop on');
+      break;
+    }
+    if (sub !== 'on' && sub !== 'off') {
+      console.error('Usage: reroute desktop <on|off|status>');
+      process.exitCode = 1;
+      break;
+    }
+    try {
+      const r = setDesktopRouting(sub === 'on', url);
+      if (sub === 'on') console.log(`The Claude desktop app's Code tab now goes through Reroute (${r.file}). Quit the app completely (tray icon > Quit) and reopen it.`);
+      else console.log(r.changed ? `Removed Reroute from ${r.file}${r.removed ? ' (file deleted)' : ''}. Restart the desktop app.` : 'The desktop app was not routed through Reroute.');
+    } catch (e) {
+      if (e.code === 'EPERM' || e.code === 'EACCES') {
+        console.error(`This needs administrator rights (it writes ${managedSettingsPath()}).`);
+        console.error('Open PowerShell with "Run as administrator", then run:');
+        console.error(`  reroute desktop ${sub}`);
+      } else console.error(e.message);
       process.exitCode = 1;
     }
     break;
@@ -1017,7 +1057,15 @@ switch (cmd) {
     if (line === 'taken') console.log('You already have a status line, so it was left alone. Add `reroute statusline` to it to see which model is answering.');
     else console.log('Status line: shows which model is answering, under the Claude Code prompt.');
     if (pickerRows) console.log(`Added ${pickerRows} open-source models to the /model menu in Claude Code (terminal and desktop).`);
-    console.log('\nRestart Claude Code (terminal) and the Claude desktop app so they pick up the change.');
+    if (!desktopRouting().on) {
+      try {
+        setDesktopRouting(true, url);
+        console.log('Desktop app: its Code tab goes through Reroute too.');
+      } catch {
+        console.log('\nDesktop app: its Code tab sets its own address and bypasses Reroute. To include it, open PowerShell as administrator and run:  reroute desktop on');
+      }
+    }
+    console.log('\nRestart Claude Code (terminal) and the Claude desktop app (tray icon > Quit, then reopen) so they pick up the change.');
     const s = await running();
     if (s && !s.resolvedFallback) {
       console.log('\nNo fallback model is usable yet. Do one of these:');
@@ -1038,6 +1086,14 @@ switch (cmd) {
       await api('shutdown', {});
     } catch {}
     console.log(`Removed Reroute from ${CLAUDE_SETTINGS}${f ? ` and ${f}` : ''}. Restart Claude Code / the desktop app.`);
+    if (desktopRouting().on) {
+      try {
+        setDesktopRouting(false);
+        console.log('Also removed it from the desktop app settings.');
+      } catch {
+        console.log('The desktop app is still pointed at Reroute. In an administrator PowerShell, run: reroute desktop off');
+      }
+    }
     break;
   }
 
